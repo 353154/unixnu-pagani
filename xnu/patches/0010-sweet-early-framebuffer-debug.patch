@@ -99,7 +99,7 @@ index d89b0f1..d0c710d 100644
  
  	flush_mmu_tlb();
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index ccbb188..a8d3d8f 100644
+index ccbb188..f9f3faf 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
 @@ -212,6 +212,26 @@ LEXT(ResetHandlerData)
@@ -205,7 +205,7 @@ index ccbb188..a8d3d8f 100644
  
  	b		common_start
  
-@@ -741,9 +806,29 @@ common_start:
+@@ -741,9 +806,31 @@ common_start:
  #endif /* HAS_APPLE_PAC */
  
  	// Enable caches, MMU, ROP and JOP
@@ -214,14 +214,16 @@ index ccbb188..a8d3d8f 100644
 +	/*
 +	 * Standard ARM64 Linux approach for Hypervisors (Gunyah):
 +	 * Read the firmware/Hypervisor-initialized SCTLR_EL1, preserve all
-+	 * architectural/virtualization control bits, and only enable M (bit 0),
-+	 * C (bit 2), I (bit 12), and SPAN (bit 23).
++	 * architectural/virtualization control bits.
++	 * CRITICAL QUALCOMM FIX: Keep D-Cache OFF (C=0) during early bootstrap!
++	 * Qualcomm XPUs fault on speculative reads of protected carve-outs (TZ,
++	 * hyp, modem...) when broad RAM ranges are mapped Cacheable before arm_vm_init.
 +	 */
 +	mrs		x0, SCTLR_EL1
-+	orr		x0, x0, #(1 << 0)
-+	orr		x0, x0, #(1 << 2)
-+	orr		x0, x0, #(1 << 12)
-+	orr		x0, x0, #(1 << 23)
++	orr		x0, x0, #(1 << 0)   // Enable MMU
++	bic		x0, x0, #(1 << 2)   // Keep D-Cache DISABLED to prevent Qualcomm XPU carveout faults!
++	orr		x0, x0, #(1 << 12)  // Enable I-Cache
++	orr		x0, x0, #(1 << 23)  // SPAN: Keep PAN clear across exceptions
 +	MSR_SCTLR_EL1_X0
 +	isb		sy
 +	msr		PAN, #0
@@ -235,7 +237,7 @@ index ccbb188..a8d3d8f 100644
  
  #if !VMAPPLE && !defined(SWEET)
  	MOV64   x1, SCTLR_EL1_DEFAULT
-@@ -794,6 +879,12 @@ common_start:
+@@ -794,6 +881,12 @@ common_start:
  	add		x0, x20, x22
  	sub		x0, x0, x23
  
