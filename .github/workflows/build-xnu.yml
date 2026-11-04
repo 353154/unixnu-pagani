@@ -2,10 +2,17 @@ name: Build XNU Kernel for OnePlus 13s (SM8750)
 
 on:
   workflow_dispatch:
+    inputs:
+      kernel_config:
+        description: RELEASE / DEVELOPMENT / DEBUG
+        default: DEVELOPMENT
+      machine_config:
+        description: xnu MACHINE_CONFIG (PAGANI / SWEET)
+        default: PAGANI
   push:
     branches: [main]
     paths:
-      - 'patches/**'
+      - 'xnu/patches/**'
       - '.github/workflows/build-xnu.yml'
 
 concurrency:
@@ -16,11 +23,12 @@ env:
   DXB_REPO: https://github.com/blacktop/darwin-xnu-build
   DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
   MACOS_VERSION: '13.5'
-  KERNEL_CONFIG: 'DEVELOPMENT'
-  MACHINE_CONFIG: 'PAGANI'
+  KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
+  MACHINE_CONFIG: ${{ inputs.machine_config || 'PAGANI' }}
 
 jobs:
   build:
+    # macos-14 runs Xcode 15.x which matches the xnu-8796 IORPC ABI
     runs-on: macos-14
     timeout-minutes: 120
     steps:
@@ -31,11 +39,11 @@ jobs:
           git init -q dxb
           git -C dxb fetch -q --depth 1 "$DXB_REPO" "$DXB_SHA"
           git -C dxb checkout -q FETCH_HEAD
-          if [ -d patches ]; then
-            cp patches/*.patch dxb/patches/ 2>/dev/null || true
-          fi
-          # Configure ARM64 target
-          sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="arm64" VALID_ARCHS="arm64"/' dxb/build.sh
+          # Copy all patches and dependency staging scripts
+          cp xnu/patches/*.patch xnu/patches/*.sh dxb/patches/
+          # Allow plain arm64 target architecture
+          sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64e arm64" VALID_ARCHS="x86_64 arm64e arm64"/' dxb/build.sh
+          grep -c 'VALID_ARCHS="x86_64 arm64e arm64"' dxb/build.sh
           ls -la dxb/patches
 
       - name: Setup Dependencies and Native Xcode
@@ -49,11 +57,14 @@ jobs:
           echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"
           sudo xcode-select -s "$XC"
           xcodebuild -version
+          xcrun --find iig
 
       - name: Compile XNU Kernel
         working-directory: dxb
+        env:
+          MAKEFLAGS: -k
         run: |
-          bash build.sh || true
+          bash build.sh
 
       - name: Collect Kernel Artifacts
         if: always()
@@ -61,6 +72,7 @@ jobs:
           mkdir -p out
           cp -R dxb/fakeroot/System/Library/Kernels/. out/ 2>/dev/null || true
           cp -R dxb/build/xnu.obj/out/. out/ 2>/dev/null || true
+          find dxb/build/xnu.obj -name "kernel*" -type f -exec cp {} out/ \; 2>/dev/null || true
           ls -la out
           (cd out && shasum -a 256 * > SHA256SUMS 2>/dev/null) || true
 
