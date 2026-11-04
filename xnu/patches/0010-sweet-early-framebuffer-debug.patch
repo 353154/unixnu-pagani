@@ -99,10 +99,10 @@ index d89b0f1..d0c710d 100644
  
  	flush_mmu_tlb();
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index ccbb188..b8103dc 100644
+index ccbb188..eb07d5b 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -212,6 +212,25 @@ LEXT(ResetHandlerData)
+@@ -212,6 +212,26 @@ LEXT(ResetHandlerData)
  	.text
  
  
@@ -111,6 +111,7 @@ index ccbb188..b8103dc 100644
 +	MOV64	x1, (0xfc800000 + 520 * 4864 + (\x_off) * 4)
 +	MOV64	x2, \color_val
 +	mov		x3, #40
++	mov		x4, #4864
 +101:
 +	mov		x5, #40
 +	mov		x6, x1
@@ -118,7 +119,7 @@ index ccbb188..b8103dc 100644
 +	str		w2, [x6], #4
 +	subs	x5, x5, #1
 +	b.ne	102b
-+	add		x1, x1, #4864
++	add		x1, x1, x4
 +	subs	x3, x3, #1
 +	b.ne	101b
 +	dsb		sy
@@ -128,7 +129,7 @@ index ccbb188..b8103dc 100644
  /*
   * __start trampoline is located at a position relative to LowResetVectorBase
   * so that iBoot can compute the reset vector position to set IORVBAR using
-@@ -220,6 +239,24 @@ LEXT(ResetHandlerData)
+@@ -220,6 +240,24 @@ LEXT(ResetHandlerData)
  	.align	3
  	.globl EXT(_start)
  LEXT(_start)
@@ -153,7 +154,7 @@ index ccbb188..b8103dc 100644
  	b	EXT(start_first_cpu)
  
  
-@@ -456,13 +493,19 @@ start_cpu:
+@@ -456,13 +494,19 @@ start_cpu:
  	.globl EXT(start_first_cpu)
  LEXT(start_first_cpu)
  
@@ -173,7 +174,7 @@ index ccbb188..b8103dc 100644
  	// Set low reset vector before attempting any loads
  	adrp	x0, EXT(LowExceptionVectorBase)@page
  	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
-@@ -609,9 +652,30 @@ Lkernelcache_base_found:
+@@ -609,9 +653,30 @@ Lkernelcache_base_found:
  	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
  	create_bootstrap_mapping x14, x15, x5, x3, x2, x9, x10, x11, x12, x13
  
@@ -204,7 +205,7 @@ index ccbb188..b8103dc 100644
  
  	b		common_start
  
-@@ -741,10 +805,17 @@ common_start:
+@@ -741,10 +806,17 @@ common_start:
  #endif /* HAS_APPLE_PAC */
  
  	// Enable caches, MMU, ROP and JOP
@@ -222,7 +223,7 @@ index ccbb188..b8103dc 100644
  #if !VMAPPLE && !defined(SWEET)
  	MOV64   x1, SCTLR_EL1_DEFAULT
  	cmp		x0, x1
-@@ -794,6 +865,12 @@ common_start:
+@@ -794,6 +866,12 @@ common_start:
  	add		x0, x20, x22
  	sub		x0, x0, x23
  
