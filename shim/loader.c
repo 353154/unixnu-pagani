@@ -11,6 +11,7 @@
 #include "console.h"
 #include "fdt.h"
 #include "loader.h"
+extern char _head[], _end[];
 
 #define BOOT_LINE_LENGTH	608
 #define PAGE_16K		0x4000UL
@@ -86,10 +87,22 @@ const char *loader_boot(uintptr_t dtb)
 	con_hex2("INITRD", "lo=", rd_start, "hi=", rd_end);
 
 	uintptr_t payload_addr = 0;
-	for (uintptr_t addr = rd_start; addr + sizeof(struct payload) <= rd_end; addr += 8) {
+	/* 1. First, search in memory attached right behind BootShim */
+	for (uintptr_t addr = (uintptr_t)_head; addr + sizeof(struct payload) <= (uintptr_t)_head + 0x2000000UL; addr += 8) {
 		if (magic_ok((const char *)addr)) {
 			payload_addr = addr;
+			con_hex("ATTACHED", payload_addr);
 			break;
+		}
+	}
+	/* 2. Fallback to initrd if not attached */
+	if (!payload_addr && rd_start && rd_end > rd_start) {
+		for (uintptr_t addr = rd_start; addr + sizeof(struct payload) <= rd_end; addr += 8) {
+			if (magic_ok((const char *)addr)) {
+				payload_addr = addr;
+				con_hex("INITRD", payload_addr);
+				break;
+			}
 		}
 	}
 	if (!payload_addr)
@@ -105,8 +118,8 @@ const char *loader_boot(uintptr_t dtb)
 	con_hex("ENTRY", p->entry_va);
 
 	/* The payload must not overlap where the kernel goes. */
-	if (rd_end > p->phys_base && rd_start < p->phys_base + p->mem_size)
-		return "ramdisk overlaps kernel memory";
+	if (payload_addr + sizeof(struct payload) > p->phys_base && payload_addr < p->phys_base + p->mem_size)
+		return "payload overlaps kernel memory";
 
 	for (uint32_t i = 0; i < p->nsegs; i++) {
 		const struct payload_seg *s = &p->segs[i];
