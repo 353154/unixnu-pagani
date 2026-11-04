@@ -102,10 +102,11 @@ diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
 index ccbb188..7af7f7b 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -212,6 +212,26 @@
+@@ -211,6 +211,44 @@
+ 	.space  (rhdSize_NUM),0		// (filled with 0s)
  	.text
  
- 
++
 +#if defined(SWEET)
 +.macro SWEET_CHECKPOINT x_off, color_val
 +	MOV64	x1, (0xfc800000 + 520 * 4864 + (\x_off) * 4)
@@ -124,12 +125,29 @@ index ccbb188..7af7f7b 100644
 +	b.ne	101b
 +	dsb		sy
 +.endmacro
-+#endif
 +
++/* Tiny 24x24 marker, no trailing dsb: for instruction-level bisection. */
++.macro SWEET_MICRO x_off, color_val
++	MOV64	x1, (0xfc800000 + 580 * 4864 + (\x_off) * 4)
++	MOV64	x2, \color_val
++	mov		x3, #24
++	mov		x4, #4864
++111:
++	mov		x5, #24
++	mov		x6, x1
++112:
++	str		w2, [x6], #4
++	subs	x5, x5, #1
++	b.ne	112b
++	add		x1, x1, x4
++	subs	x3, x3, #1
++	b.ne	111b
++.endmacro
++#endif
+ 
  /*
   * __start trampoline is located at a position relative to LowResetVectorBase
-  * so that iBoot can compute the reset vector position to set IORVBAR using
-@@ -220,6 +240,24 @@
+@@ -220,6 +258,24 @@
  	.align	3
  	.globl EXT(_start)
  LEXT(_start)
@@ -154,7 +172,7 @@ index ccbb188..7af7f7b 100644
  	b	EXT(start_first_cpu)
  
  
-@@ -389,7 +427,11 @@
+@@ -389,7 +445,11 @@
  	lsr		$4, $4, #(ARM_TTE_BLOCK_L2_SHIFT)	// Get index in L2 table for block entry
  	lsl		$4, $4, #(TTE_SHIFT)				// Convert index into pointer offset
  	add		$4, $2, $4							// Get L2 entry pointer
@@ -166,7 +184,7 @@ index ccbb188..7af7f7b 100644
  	and		$6, $1, #(ARM_TTE_BLOCK_L2_MASK)	// Get address bits of block mapping
  	orr		$6, $5, $6
  	mov		$5, $3
-@@ -456,13 +498,19 @@
+@@ -456,13 +516,19 @@
  	.globl EXT(start_first_cpu)
  LEXT(start_first_cpu)
  
@@ -186,12 +204,10 @@ index ccbb188..7af7f7b 100644
  	// Set low reset vector before attempting any loads
  	adrp	x0, EXT(LowExceptionVectorBase)@page
  	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
-@@ -609,10 +657,46 @@
+@@ -609,9 +675,45 @@
  	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
  	create_bootstrap_mapping x14, x15, x5, x3, x2, x9, x10, x11, x12, x13
  
--	/* Ensure TTEs are visible */
--	dsb		ish
 +#if defined(SWEET)
 +	/*
 +	 * Splash framebuffer: one 32MB Normal-NC block in the EXISTING V=P
@@ -209,8 +225,9 @@ index ccbb188..7af7f7b 100644
 +	add		x13, x25, #(2 * PGBYTES)
 +	str		x11, [x13, x12, lsl #TTE_SHIFT]
 +#endif
- 
-+	/* Ensure TTEs are visible */
++
+ 	/* Ensure TTEs are visible */
+-	dsb		ish
 +#if defined(SWEET)
 +	/*
 +	 * Clean all bootstrap page tables to Point of Coherence (PoC).
@@ -231,11 +248,10 @@ index ccbb188..7af7f7b 100644
 +#if defined(SWEET)
 +	SWEET_CHECKPOINT 160, 0xff00ffff
 +#endif
-+
+ 
  	b		common_start
  
- /*
-@@ -741,9 +825,41 @@
+@@ -741,9 +843,44 @@
  #endif /* HAS_APPLE_PAC */
  
  	// Enable caches, MMU, ROP and JOP
@@ -267,7 +283,10 @@ index ccbb188..7af7f7b 100644
 +	SWEET_CHECKPOINT 250, 0xffffffff
 +	MSR_SCTLR_EL1_X0
 +	SWEET_CHECKPOINT 265, 0xffff8800
++	/* CP3B painted above ends with dsb sy; marker proves the dsb retired. */
++	SWEET_MICRO 100, 0xff00ff88
 +	isb		sy
++	SWEET_MICRO 140, 0xffff00aa
 +	SWEET_CHECKPOINT 280, 0xff00ff00
 +#else
  	MOV64   x0, SCTLR_EL1_DEFAULT
@@ -277,7 +296,7 @@ index ccbb188..7af7f7b 100644
  
  #if !VMAPPLE && !defined(SWEET)
  	MOV64   x1, SCTLR_EL1_DEFAULT
-@@ -794,6 +910,12 @@
+@@ -794,6 +931,12 @@
  	add		x0, x20, x22
  	sub		x0, x0, x23
  
@@ -290,7 +309,7 @@ index ccbb188..7af7f7b 100644
  #if KASAN
  	mov	x20, x0
  	mov	x21, lr
-@@ -867,6 +989,105 @@
+@@ -867,6 +1010,105 @@
  	/* Return to arm_init() */
  	ret
  
