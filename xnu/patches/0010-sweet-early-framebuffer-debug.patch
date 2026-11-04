@@ -1,5 +1,5 @@
 diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
-index e26a1d7..e3579f1 100644
+index e26a1d7..5ab0fb1 100644
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
 @@ -56,6 +56,7 @@
@@ -10,16 +10,28 @@ index e26a1d7..e3579f1 100644
  #include <arm/pmap.h>
  #include <arm/caches_internal.h>
  #include <arm/cpu_internal.h>
-@@ -346,6 +347,8 @@ arm_init(
+@@ -346,6 +347,20 @@ arm_init(
  	DTEntry chosen = NULL;
  	unsigned int dt_entry_size = 0;
  
++#if defined(SWEET)
++	{
++		volatile uint32_t *fb = (volatile uint32_t *)(uintptr_t)(0xfc800000 + 520 * 4864 + 400 * 4);
++		for (unsigned int y = 0; y < 40; y++) {
++			for (unsigned int x = 0; x < 40; x++) {
++				fb[y * (4864 / 4) + x] = 0xffffaa00u;
++			}
++		}
++		__asm__ volatile("dsb sy" ::: "memory");
++	}
++#endif
++
 +	sweet_early_mark(1, "arm_init entered (MMU on)");
 +
  	arm_setup_pre_sign();
  
  	arm_slide_rebase_and_sign_image();
-@@ -362,6 +365,7 @@ arm_init(
+@@ -362,6 +377,7 @@ arm_init(
  #endif /* defined(HAS_APPLE_PAC) */
  
  	PE_init_platform(FALSE, args); /* Get platform expert set up */
@@ -27,7 +39,7 @@ index e26a1d7..e3579f1 100644
  
  #if __arm64__
  	configure_timer_apple_regs();
-@@ -423,6 +427,7 @@ arm_init(
+@@ -423,6 +439,7 @@ arm_init(
  #endif
  
  	ml_parse_cpu_topology();
@@ -35,7 +47,7 @@ index e26a1d7..e3579f1 100644
  
  
  	master_cpu = ml_get_boot_cpu_number();
-@@ -453,11 +458,13 @@ arm_init(
+@@ -453,11 +470,13 @@ arm_init(
  	 */
  	thread->machine.preemption_count = 0;
  	cpu_bootstrap();
@@ -49,7 +61,7 @@ index e26a1d7..e3579f1 100644
  
  	/*
  	 * Initialize the timer callout world
-@@ -466,6 +473,7 @@ arm_init(
+@@ -466,6 +485,7 @@ arm_init(
  
  	cpu_init();
  
@@ -57,7 +69,7 @@ index e26a1d7..e3579f1 100644
  	processor_bootstrap();
  
  	if (PE_parse_boot_argn("maxmem", &maxmem, sizeof(maxmem))) {
-@@ -513,6 +521,7 @@ arm_init(
+@@ -513,6 +533,7 @@ arm_init(
  	__builtin_arm_wsr("pan", 1);
  #endif  /* __ARM_PAN_AVAILABLE__ */
  
@@ -87,10 +99,36 @@ index d89b0f1..d0c710d 100644
  
  	flush_mmu_tlb();
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index ccbb188..ac553fb 100644
+index ccbb188..b8103dc 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -220,6 +220,24 @@ LEXT(ResetHandlerData)
+@@ -212,6 +212,25 @@ LEXT(ResetHandlerData)
+ 	.text
+ 
+ 
++#if defined(SWEET)
++.macro SWEET_CHECKPOINT x_off, color_val
++	MOV64	x1, (0xfc800000 + 520 * 4864 + (\x_off) * 4)
++	MOV64	x2, \color_val
++	mov		x3, #40
++101:
++	mov		x5, #40
++	mov		x6, x1
++102:
++	str		w2, [x6], #4
++	subs	x5, x5, #1
++	b.ne	102b
++	add		x1, x1, #4864
++	subs	x3, x3, #1
++	b.ne	101b
++	dsb		sy
++.endmacro
++#endif
++
+ /*
+  * __start trampoline is located at a position relative to LowResetVectorBase
+  * so that iBoot can compute the reset vector position to set IORVBAR using
+@@ -220,6 +239,24 @@ LEXT(ResetHandlerData)
  	.align	3
  	.globl EXT(_start)
  LEXT(_start)
@@ -115,7 +153,7 @@ index ccbb188..ac553fb 100644
  	b	EXT(start_first_cpu)
  
  
-@@ -456,8 +474,10 @@ start_cpu:
+@@ -456,13 +493,19 @@ start_cpu:
  	.globl EXT(start_first_cpu)
  LEXT(start_first_cpu)
  
@@ -126,7 +164,16 @@ index ccbb188..ac553fb 100644
  	msr		DAIFSet, #(DAIFSC_ALL)				// Disable all interrupts
  
  	mov		x20, x0
-@@ -609,6 +629,24 @@ Lkernelcache_base_found:
+ 	mov		x21, #0
+ 
++#if defined(SWEET)
++	SWEET_CHECKPOINT 100, 0xffffff00
++#endif
++
+ 	// Set low reset vector before attempting any loads
+ 	adrp	x0, EXT(LowExceptionVectorBase)@page
+ 	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
+@@ -609,9 +652,30 @@ Lkernelcache_base_found:
  	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
  	create_bootstrap_mapping x14, x15, x5, x3, x2, x9, x10, x11, x12, x13
  
@@ -151,6 +198,43 @@ index ccbb188..ac553fb 100644
  	/* Ensure TTEs are visible */
  	dsb		ish
  
++#if defined(SWEET)
++	SWEET_CHECKPOINT 160, 0xff00ffff
++#endif
+ 
+ 	b		common_start
+ 
+@@ -741,10 +805,17 @@ common_start:
+ #endif /* HAS_APPLE_PAC */
+ 
+ 	// Enable caches, MMU, ROP and JOP
++#if defined(SWEET)
++	SWEET_CHECKPOINT 220, 0xffff00ff
++#endif
+ 	MOV64   x0, SCTLR_EL1_DEFAULT
+ 	MSR_SCTLR_EL1_X0
+ 	isb		sy
+ 
++#if defined(SWEET)
++	SWEET_CHECKPOINT 280, 0xff00ff00
++#endif
++
+ #if !VMAPPLE && !defined(SWEET)
+ 	MOV64   x1, SCTLR_EL1_DEFAULT
+ 	cmp		x0, x1
+@@ -794,6 +865,12 @@ common_start:
+ 	add		x0, x20, x22
+ 	sub		x0, x0, x23
+ 
++#if defined(SWEET)
++	mov		x19, x0
++	SWEET_CHECKPOINT 340, 0xff0088ff
++	mov		x0, x19
++#endif
++
+ #if KASAN
+ 	mov	x20, x0
+ 	mov	x21, lr
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
 new file mode 100644
 index 0000000..2c727ea
