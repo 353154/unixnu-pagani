@@ -99,7 +99,7 @@ index d89b0f1..d0c710d 100644
  
  	flush_mmu_tlb();
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index ccbb188..f9f3faf 100644
+index ccbb188..7af7f7b 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
 @@ -212,6 +212,26 @@ LEXT(ResetHandlerData)
@@ -154,7 +154,19 @@ index ccbb188..f9f3faf 100644
  	b	EXT(start_first_cpu)
  
  
-@@ -456,13 +494,19 @@ start_cpu:
+@@ -389,7 +427,11 @@ start_cpu:
+ 	lsr		$4, $4, #(ARM_TTE_BLOCK_L2_SHIFT)	// Get index in L2 table for block entry
+ 	lsl		$4, $4, #(TTE_SHIFT)				// Convert index into pointer offset
+ 	add		$4, $2, $4							// Get L2 entry pointer
++#if defined(SWEET)
++	MOV64	$5, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_INNER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITEBACK) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_NX)
++#else
+ 	mov		$5, #(ARM_TTE_BOOT_BLOCK)			// Get L2 block entry template
++#endif
+ 	and		$6, $1, #(ARM_TTE_BLOCK_L2_MASK)	// Get address bits of block mapping
+ 	orr		$6, $5, $6
+ 	mov		$5, $3
+@@ -456,13 +498,19 @@ start_cpu:
  	.globl EXT(start_first_cpu)
  LEXT(start_first_cpu)
  
@@ -174,7 +186,7 @@ index ccbb188..f9f3faf 100644
  	// Set low reset vector before attempting any loads
  	adrp	x0, EXT(LowExceptionVectorBase)@page
  	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
-@@ -609,9 +653,31 @@ Lkernelcache_base_found:
+@@ -609,9 +657,45 @@ Lkernelcache_base_found:
  	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
  	create_bootstrap_mapping x14, x15, x5, x3, x2, x9, x10, x11, x12, x13
  
@@ -198,6 +210,20 @@ index ccbb188..f9f3faf 100644
 +
  	/* Ensure TTEs are visible */
 -	dsb		ish
++#if defined(SWEET)
++	/*
++	 * Clean all bootstrap page tables to Point of Coherence (PoC).
++	 * Oryon MMU Translation Table Walker reads directly from DRAM / PoC when
++	 * D-Cache is disabled (C=0).
++	 */
++	mov		x10, x25
++	mov		x11, #(8 * PGBYTES)
++103:
++	dc		civac, x10
++	add		x10, x10, #64
++	subs	x11, x11, #64
++	b.ne	103b
++#endif
 +	dsb		sy
 +	isb
  
@@ -207,7 +233,7 @@ index ccbb188..f9f3faf 100644
  
  	b		common_start
  
-@@ -741,9 +806,34 @@ common_start:
+@@ -741,9 +825,34 @@ common_start:
  #endif /* HAS_APPLE_PAC */
  
  	// Enable caches, MMU, ROP and JOP
@@ -242,7 +268,7 @@ index ccbb188..f9f3faf 100644
  
  #if !VMAPPLE && !defined(SWEET)
  	MOV64   x1, SCTLR_EL1_DEFAULT
-@@ -794,6 +881,12 @@ common_start:
+@@ -794,6 +903,12 @@ common_start:
  	add		x0, x20, x22
  	sub		x0, x0, x23
  
