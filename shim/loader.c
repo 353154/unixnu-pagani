@@ -87,8 +87,9 @@ const char *loader_boot(uintptr_t dtb)
 	con_hex2("INITRD", "lo=", rd_start, "hi=", rd_end);
 
 	uintptr_t payload_addr = 0;
-	/* 1. First, search in memory attached right behind BootShim */
-	for (uintptr_t addr = (uintptr_t)_head; addr + sizeof(struct payload) <= (uintptr_t)_head + 0x2000000UL; addr += 8) {
+	/* 1. First, check attached payload directly behind BootShim (_end) */
+	uintptr_t appended = ((uintptr_t)_end + 0x3fffUL) & ~0x3fffUL;
+	for (uintptr_t addr = appended; addr + sizeof(struct payload) <= appended + 0x2000000UL; addr += 8) {
 		if (magic_ok((const char *)addr)) {
 			payload_addr = addr;
 			con_hex("ATTACHED", payload_addr);
