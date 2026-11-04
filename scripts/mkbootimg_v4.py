@@ -46,7 +46,7 @@ def create_boot_v4(kernel_path: str, ramdisk_path: str, output_path: str, cmdlin
     # 4I: reserved[4]
     # I: header_version (4)
     # 2048s: cmdline
-    header_fmt = '<8sIIIII4II2048s'
+    header_fmt = '<8sIIII4II2048s'
     cmdline_bytes = cmdline.encode('utf-8')[:2048].ljust(2048, b'\x00')
 
     hdr = struct.pack(

@@ -6,6 +6,7 @@ Target: OnePlus 13s / 13T (SM8750 / Oryon, pagani)
 
 import argparse
 import os
+import struct
 import subprocess
 import sys
 
@@ -44,15 +45,33 @@ def main():
     run(f'python3 "{mkpayload_py}" "{args.kernel}" "{adt_path}" "{payload_path}" {cmdline_arg} {ramdisk_arg}')
 
     if args.shim and os.path.exists(args.shim):
-        print(">>> 3. Packaging into Android Header v4 boot.img...")
+        print(">>> 3. Attaching payload directly behind BootShim Image...")
+        with open(args.shim, 'rb') as f:
+            shim_bytes = f.read()
+        with open(payload_path, 'rb') as f:
+            payload_bytes = f.read()
+
+        # 16KB align
+        pad_len = (16384 - (len(shim_bytes) % 16384)) % 16384
+        combined = bytearray(shim_bytes + (b'\x00' * pad_len) + payload_bytes)
+        
+        # Update arm64 Linux Image Header image_size at offset 16 (uint64_le)
+        total_size = len(combined)
+        struct.pack_into('<Q', combined, 16, total_size)
+        
+        combined_path = os.path.join(args.out_dir, "Image.combined")
+        with open(combined_path, 'wb') as f:
+            f.write(combined)
+        print(f"Combined kernel size: {total_size} bytes (Shim: {len(shim_bytes)}, Payload: {len(payload_bytes)})")
+
+        print(">>> 4. Packaging into Android Header v4 boot.img (GKI format, kernel-only)...")
         mkbootimg_py = os.path.join(SCRIPTS_DIR, "mkbootimg_v4.py")
-        run(f'python3 "{mkbootimg_py}" --format boot --kernel "{args.shim}" --ramdisk "{payload_path}" --output "{boot_img_path}"')
+        run(f'python3 "{mkbootimg_py}" --format boot --kernel "{combined_path}" --ramdisk "{payload_path}" --output "{boot_img_path}"')
         print(f"\n[SUCCESS] Image generated at: {boot_img_path}")
         print("To test boot on device via fastboot:")
         print(f"  fastboot boot {boot_img_path}")
     else:
         print(f"\n[INFO] Payload built at: {payload_path}")
-        print("Provide --shim <path_to_shim_Image> to produce final test-boot.img")
 
 if __name__ == "__main__":
     main()
