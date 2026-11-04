@@ -184,7 +184,7 @@ index ccbb188..7af7f7b 100644
  	and		$6, $1, #(ARM_TTE_BLOCK_L2_MASK)	// Get address bits of block mapping
  	orr		$6, $5, $6
  	mov		$5, $3
-@@ -456,12 +516,18 @@
+@@ -456,13 +516,19 @@
  	.globl EXT(start_first_cpu)
  LEXT(start_first_cpu)
  
@@ -196,17 +196,20 @@ index ccbb188..7af7f7b 100644
  
  	mov		x20, x0
  	mov		x21, #0
-+
+ 
 +#if defined(SWEET)
 +	SWEET_CHECKPOINT 100, 0xffffff00
 +#endif
- 
++
  	// Set low reset vector before attempting any loads
  	adrp	x0, EXT(LowExceptionVectorBase)@page
-@@ -609,9 +675,45 @@
+ 	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
+@@ -609,10 +675,46 @@
  	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
  	create_bootstrap_mapping x14, x15, x5, x3, x2, x9, x10, x11, x12, x13
  
+-	/* Ensure TTEs are visible */
+-	dsb		ish
 +#if defined(SWEET)
 +	/*
 +	 * Splash framebuffer: one 32MB Normal-NC block in the EXISTING V=P
@@ -224,9 +227,8 @@ index ccbb188..7af7f7b 100644
 +	add		x13, x25, #(2 * PGBYTES)
 +	str		x11, [x13, x12, lsl #TTE_SHIFT]
 +#endif
-+
- 	/* Ensure TTEs are visible */
--	dsb		ish
+ 
++	/* Ensure TTEs are visible */
 +#if defined(SWEET)
 +	/*
 +	 * Clean all bootstrap page tables to Point of Coherence (PoC).
@@ -247,9 +249,10 @@ index ccbb188..7af7f7b 100644
 +#if defined(SWEET)
 +	SWEET_CHECKPOINT 160, 0xff00ffff
 +#endif
- 
++
  	b		common_start
  
+ /*
 @@ -741,9 +843,57 @@
  #endif /* HAS_APPLE_PAC */
  
@@ -308,7 +311,7 @@ index ccbb188..7af7f7b 100644
  
  #if !VMAPPLE && !defined(SWEET)
  	MOV64   x1, SCTLR_EL1_DEFAULT
-@@ -794,6 +944,14 @@
+@@ -794,6 +944,25 @@
  	add		x0, x20, x22
  	sub		x0, x0, x23
  
@@ -316,14 +319,25 @@ index ccbb188..7af7f7b 100644
 +	mov		x19, x0
 +	SWEET_CHECKPOINT 340, 0xff0088ff
 +	mov		x0, x19
-+	isb		sy				// deferred context sync (attribution probe)
-+	SWEET_MICRO 180, 0xff008888		// isb survived
++	/*
++	 * eret-based context sync: isb sy with SCTLR.M=1 hangs this core
++	 * (bisected twice: d711f90 and 23e7859). An exception return is an
++	 * equally valid context synchronization event and takes a different
++	 * hardware path. DAIF masked, stay in EL1h, land at 91f.
++	 */
++	adr		x9, 91f
++	msr		ELR_EL1, x9
++	mov		x10, #0x3c5			// DAIF all set, M[3:0]=EL1h
++	msr		SPSR_EL1, x10
++	eret
++91:
++	SWEET_MICRO 180, 0xff008888		// eret context sync survived
 +#endif
 +
  #if KASAN
  	mov	x20, x0
  	mov	x21, lr
-@@ -863,10 +1021,110 @@
+@@ -863,10 +1032,110 @@
  	bl		EXT(phystokv)
  
  	mov		lr, x19
