@@ -292,3 +292,51 @@ flowchart LR
 2. **第 400 行的 400×100 白块** = Stage0；**第 520 行 x=400 的橙色块** = 已进入 `arm_init`（C 语言世界）；
 3. 若出现第 600/700/760 行的异常证据区：色条查上表定异常类型，位带从左到右按二进制读出 ESR/FAR；
 4. 定格画面为最终状态（`wfe` 驻留），可随时长按电源键强制重启恢复 ColorOS，无任何写入风险。
+
+### 7.6 实测结果链：三次真机迭代锁定冻结指令 (2026-11-05 06:00 ~ 06:15)
+
+| 构建版本 | 新增能力 | 真机读数 | 结论 |
+| :---: | :--- | :--- | :--- |
+| `4d04685` (NX 移除版) | 平坦映射去 NX | 最远点亮珊瑚橙 CP3B | `msr SCTLR_EL1` 成功返回，MMU 开启后 ~20 条指令 + 1600 次显存写入全部成功 |
+| `e265c82` (异常向量版) | 16 槽彩色异常表 + ESR/FAR 位带 | 依然橙色；**无任何异常色条/位带** | 排除一切同步/异步异常（Abort、SError 都没发生）——CPU 是无声冻结 |
+| `d711f90` (二分标记版) | `dsb sy` 后草绿块 / `isb sy` 后粉红块 | **草绿亮、粉红不亮** | **冻结点 = `isb sy`**（`dsb sy` 屏障正常放行，在途事务全部完成） |
+
+> 微观证据链：`movk/mov` 类指令不可能挂死且粉红块 0 个像素落屏 → 执行流断在 `isb sy` 一条指令上；同时无异常触发 → 不是权限/翻译故障，而是取指/总线层面的静默冻结。
+
+### 7.7 根因破获：`__ARM_IC_NOALIAS_ICACHE__` 裁掉了开 MMU 前的 TLB/I-Cache 清理
+
+对冻结点的溯源收敛到一条被编译器删除的代码：
+
+1. `pexpert/arm64/apple_arm64_common.h:37` 无条件定义 `__ARM_IC_NOALIAS_ICACHE__ = 1`（苹果假设：iBoot 引导的核心 TLB/I-Cache 永远是干净的）；
+2. 于是 `start.s` 中开 MMU 前唯一的 `tlbi vmalle1; ic iallu`（`#ifndef __ARM_IC_NOALIAS_ICACHE__` 保护块）**被整段预处理裁掉**；
+3. 本机引导链是 ABL + Gunyah：Hypervisor 时代残留的**陈旧 TLB 表项与 I-Cache 行**一直活到 XNU 接管；
+4. `SCTLR_EL1.M = 1` 瞬间陈旧翻译复活——恰好无害的表项让前 ~30 条指令照常执行（橙色块 + 草绿标记），而后续取指撞上致命表项，翻译指向 XPU 保护区 → 总线层挂起 → 无异常、无声、永久冻结；
+5. **铁证对照**：BootShim 在同一颗 SoC、同一个 Gunyah 下开 MMU 百发百中，其使能序列（`shim/mmu.c:112-122`）恰好每步都有清理：写 TCR/TTBR 后 `isb; tlbi vmalle1; dsb nsh; isb`，跳转 XNU 前再 `dsb sy; ic iallu; dsb sy; isb`。
+
+### 7.8 修复：补回 BootShim 同款清理序列 (commit `9729cb0`)
+
+在 SWEET 路径写 `SCTLR_EL1` 之前插入（位于异常向量表安装之前）：
+
+```asm
+	ic		iallu      // 无效化整个 I-Cache（苹果配置裁掉的那条）
+	tlbi	vmalle1    // 整表无效化 TLB（清 Gunyah/ABL 残留翻译）
+	dsb		sy
+	isb		sy
+```
+
+全链验证：`git apply --check` 通过 → 真机三色读数协议（SCREEN_READ_PROMPT v2）待验证。**若生效，粉红/绿/浅蓝块将依次点亮，直抵 `arm_init`。**
+
+### 7.9 工期预期与三大加速器
+
+| 里程碑 | 内容 | 预估 |
+| :---: | :--- | :--- |
+| M4 MMU 点亮 | **正在最后一击**（TLBI 修复待验证） | 当日出结论 |
+| M5 `arm_init` 全程 + early console | GIC/timer/pmap 各需过墙 | 数天迭代 |
+| M6 UFS 驱动 + 设备树 | 大块新驱动开发 | 1~2 周 |
+| M7 APFS 根文件系统 + launchd | 依赖 M6 + AMFI 签名链 | 1~2 周 |
+| M8 触屏 + 用户态图形 | 最后冲刺 | 数天 |
+
+加速器：
+1. **MMU 点亮后信息密度质变**：崩溃走 XNU panic 路径，屏幕直接打印日志（`sweet_early_panic` 已埋好），一轮数十条信息；
+2. **QEMU 并行线**（`tools/qemu-sweet.py`）：M5+ 的内核逻辑 / iOS 用户态 / launchd 在 Mac 上 GDB 秒级迭代，真机只留给硬件环节；
+3. **读屏协议 v2 + 异常向量表**：真机测试从「猜色板」升级为「结构化取证」（桌面 `SCREEN_READ_PROMPT.md`）。
