@@ -96,9 +96,9 @@
 | **CP1** | 🟨 纯黄 | `0xFFFFFF00` | `start_first_cpu` 入口 | 成功关中断，清除 DAIF，进入主 CPU 引导流程 | ✅ **已完全点亮** |
 | **CP2** | 🟦 青色 | `0xFF00FFFF` | `create_bootstrap_mapping` 后 | 16KB 页表 V=P 平坦映射与 KVA 映射构建完成，显存页表写入 | ✅ **已完全点亮** |
 | **CP3** | 🟪 品红 | `0xFFFF00FF` | `common_start` 写入 TCR/TTBR 后 | TCR、MAIR、TTBR0、TTBR1 写入就绪，到达开启 MMU 关口 | ✅ **已完全点亮** |
-| **CP3A** | ⚪ 白色 | `0xFFFFFFFF` | `MSR_SCTLR_EL1_X0` 紧前一条 | 控制位计算完成，准备执行开启 MMU 指令 | 🚀 **正在测试** |
-| **CP3B** | 🟧 珊瑚橙 | `0xFFFF8800` | `MSR_SCTLR_EL1_X0` 紧后一条 | SCTLR_EL1 写入完成，等待执行流水线同步 isb | 🚀 **正在测试** |
-| **CP4** | 🟩 绿色 | `0xFF00FF00` | `isb sy` 之后 | MMU 成功点亮，取指单元平稳跨越地址翻译鸿沟 | 🎯 **即将突破** |
+| **CP3A** | ⚪ 白色 | `0xFFFFFFFF` | `MSR_SCTLR_EL1_X0` 紧前一条 | 控制位计算完成，准备执行开启 MMU 指令 | ✅ **已点亮** |
+| **CP3B** | 🟧 珊瑚橙 | `0xFFFF8800` | `MSR_SCTLR_EL1_X0` 紧后一条 | SCTLR_EL1 写入完成，等待执行流水线同步 isb | ✅ **已点亮**（含尾部 dsb sy 放行验证） |
+| **CP4** | 🟩 绿色 | `0xFF00FF00` | `isb sy` 之后 | MMU 成功点亮，取指单元平稳跨越地址翻译鸿沟 | 🚀 **TLBI 修复验证中**（§7.7~7.8） |
 | **CP5** | 🟦 浅蓝 | `0xFF0088FF` | `ret lr` 跳转之前 | 参数完成 KVA 转换，准备跃迁至 C 语言世界 | ⏳ 待验证 |
 | **CP6** | 🟧 橙色 | `0xFFFFAA00` | `arm_init` C 语言入口第 1 行 | 成功跨越汇编/C边界，进入内核核心架构初始化 | ⏳ 待验证 |
 
