@@ -102,10 +102,11 @@ diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
 index ccbb188..7af7f7b 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -212,6 +212,44 @@
+@@ -211,6 +211,44 @@
+ 	.space  (rhdSize_NUM),0		// (filled with 0s)
  	.text
  
- 
++
 +#if defined(SWEET)
 +.macro SWEET_CHECKPOINT x_off, color_val
 +	MOV64	x1, (0xfc800000 + 520 * 4864 + (\x_off) * 4)
@@ -143,10 +144,9 @@ index ccbb188..7af7f7b 100644
 +	b.ne	111b
 +.endmacro
 +#endif
-+
+ 
  /*
   * __start trampoline is located at a position relative to LowResetVectorBase
-  * so that iBoot can compute the reset vector position to set IORVBAR using
 @@ -220,6 +258,24 @@
  	.align	3
  	.globl EXT(_start)
@@ -184,7 +184,7 @@ index ccbb188..7af7f7b 100644
  	and		$6, $1, #(ARM_TTE_BLOCK_L2_MASK)	// Get address bits of block mapping
  	orr		$6, $5, $6
  	mov		$5, $3
-@@ -456,12 +516,18 @@
+@@ -456,13 +516,19 @@
  	.globl EXT(start_first_cpu)
  LEXT(start_first_cpu)
  
@@ -196,13 +196,14 @@ index ccbb188..7af7f7b 100644
  
  	mov		x20, x0
  	mov		x21, #0
-+
+ 
 +#if defined(SWEET)
 +	SWEET_CHECKPOINT 100, 0xffffff00
 +#endif
- 
++
  	// Set low reset vector before attempting any loads
  	adrp	x0, EXT(LowExceptionVectorBase)@page
+ 	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
 @@ -609,9 +675,45 @@
  	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
  	create_bootstrap_mapping x14, x15, x5, x3, x2, x9, x10, x11, x12, x13
@@ -250,7 +251,7 @@ index ccbb188..7af7f7b 100644
  
  	b		common_start
  
-@@ -741,9 +843,56 @@
+@@ -741,9 +843,57 @@
  #endif /* HAS_APPLE_PAC */
  
  	// Enable caches, MMU, ROP and JOP
@@ -286,7 +287,7 @@ index ccbb188..7af7f7b 100644
 +
 +	mrs		x0, SCTLR_EL1
 +	bic		x0, x0, #(1 << 1)   // A = 0 (disable strict alignment faults)
-+	bic		x0, x0, #(1 << 2)   // C = 0 (keep D-Cache OFF to avoid Qualcomm XPU faults)
++	orr		x0, x0, #(1 << 2)   // C = 1 (BootShim proven config: M|C|I; C=0 was never bisected)
 +	bic		x0, x0, #(1 << 19)  // WXN = 0 (CRITICAL: prevent writable identity map from being XN!)
 +	orr		x0, x0, #(1 << 0)   // M = 1 (enable MMU)
 +	orr		x0, x0, #(1 << 12)  // I = 1 (enable I-Cache)
@@ -294,9 +295,10 @@ index ccbb188..7af7f7b 100644
 +	SWEET_CHECKPOINT 250, 0xffffffff
 +	MSR_SCTLR_EL1_X0
 +	SWEET_CHECKPOINT 265, 0xffff8800
-+	/* CP3B painted above ends with dsb sy; marker proves the dsb retired. */
++	/* CP3B painted above ends with dsb sy; marker proves the dsb retired.
++	 * isb deferred to after CP5 as an attribution probe: if the core dies
++	 * there but reaches CP5, the isb instruction itself is the killer. */
 +	SWEET_MICRO 100, 0xff00ff88
-+	isb		sy
 +	SWEET_MICRO 140, 0xffff00aa
 +	SWEET_CHECKPOINT 280, 0xff00ff00
 +#else
@@ -307,7 +309,7 @@ index ccbb188..7af7f7b 100644
  
  #if !VMAPPLE && !defined(SWEET)
  	MOV64   x1, SCTLR_EL1_DEFAULT
-@@ -794,6 +943,12 @@
+@@ -794,6 +944,13 @@
  	add		x0, x20, x22
  	sub		x0, x0, x23
  
@@ -315,12 +317,13 @@ index ccbb188..7af7f7b 100644
 +	mov		x19, x0
 +	SWEET_CHECKPOINT 340, 0xff0088ff
 +	mov		x0, x19
++	isb		sy				// deferred context sync (attribution probe)
 +#endif
 +
  #if KASAN
  	mov	x20, x0
  	mov	x21, lr
-@@ -867,6 +1022,105 @@
+@@ -867,6 +1024,105 @@
  	/* Return to arm_init() */
  	ret
  
