@@ -205,28 +205,29 @@ index ccbb188..f9f3faf 100644
  
  	b		common_start
  
-@@ -741,9 +806,31 @@ common_start:
+@@ -741,9 +806,32 @@ common_start:
  #endif /* HAS_APPLE_PAC */
  
  	// Enable caches, MMU, ROP and JOP
 +#if defined(SWEET)
 +	SWEET_CHECKPOINT 220, 0xffff00ff
 +	/*
-+	 * Standard ARM64 Linux approach for Hypervisors (Gunyah):
-+	 * Read the firmware/Hypervisor-initialized SCTLR_EL1, preserve all
-+	 * architectural/virtualization control bits.
-+	 * CRITICAL QUALCOMM FIX: Keep D-Cache OFF (C=0) during early bootstrap!
-+	 * Qualcomm XPUs fault on speculative reads of protected carve-outs (TZ,
-+	 * hyp, modem...) when broad RAM ranges are mapped Cacheable before arm_vm_init.
++	 * Standard ARM64 Linux / BootShim approach for Qualcomm & Hypervisors (Gunyah):
++	 * Read firmware/Hypervisor-initialized SCTLR_EL1.
++	 * 1. Clear WXN (bit 19): If WXN=1, writable pages (our V=P identity map) become XN,
++	 *    causing instant Instruction Abort on the very next instruction!
++	 * 2. Clear A (bit 1): Disable strict alignment checks during early bootstrap.
++	 * 3. Clear C (bit 2): Keep D-Cache DISABLED to prevent Qualcomm XPU carveout faults!
++	 * 4. Set M (bit 0), I (bit 12), SPAN (bit 23).
 +	 */
 +	mrs		x0, SCTLR_EL1
-+	orr		x0, x0, #(1 << 0)   // Enable MMU
-+	bic		x0, x0, #(1 << 2)   // Keep D-Cache DISABLED to prevent Qualcomm XPU carveout faults!
-+	orr		x0, x0, #(1 << 12)  // Enable I-Cache
-+	orr		x0, x0, #(1 << 23)  // SPAN: Keep PAN clear across exceptions
++	bic		x0, x0, #(1 << 1)   // A = 0 (disable strict alignment faults)
++	bic		x0, x0, #(1 << 2)   // C = 0 (keep D-Cache OFF to avoid Qualcomm XPU faults)
++	bic		x0, x0, #(1 << 19)  // WXN = 0 (CRITICAL: prevent writable identity map from being XN!)
++	orr		x0, x0, #(1 << 0)   // M = 1 (enable MMU)
++	orr		x0, x0, #(1 << 12)  // I = 1 (enable I-Cache)
++	orr		x0, x0, #(1 << 23)  // SPAN = 1 (keep PAN clear across exceptions)
 +	MSR_SCTLR_EL1_X0
-+	isb		sy
-+	msr		PAN, #0
 +	isb		sy
 +	SWEET_CHECKPOINT 280, 0xff00ff00
 +#else
