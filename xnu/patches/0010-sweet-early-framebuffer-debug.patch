@@ -311,33 +311,31 @@ index ccbb188..7af7f7b 100644
  
  #if !VMAPPLE && !defined(SWEET)
  	MOV64   x1, SCTLR_EL1_DEFAULT
-@@ -794,6 +944,25 @@
+@@ -794,6 +944,23 @@
  	add		x0, x20, x22
  	sub		x0, x0, x23
  
 +#if defined(SWEET)
 +	mov		x19, x0
 +	SWEET_CHECKPOINT 340, 0xff0088ff
++	SWEET_MICRO 260, 0xff880000		// CP5 trailing dsb sy retired
 +	mov		x0, x19
-+	/*
-+	 * eret-based context sync: isb sy with SCTLR.M=1 hangs this core
-+	 * (bisected twice: d711f90 and 23e7859). An exception return is an
-+	 * equally valid context synchronization event and takes a different
-+	 * hardware path. DAIF masked, stay in EL1h, land at 91f.
-+	 */
 +	adr		x9, 91f
 +	msr		ELR_EL1, x9
-+	mov		x10, #0x3c5			// DAIF all set, M[3:0]=EL1h
++	SWEET_MICRO 280, 0xff008800		// msr ELR_EL1 survived
++	mov		x10, #0x3c5
 +	msr		SPSR_EL1, x10
++	SWEET_MICRO 300, 0xff000088		// msr SPSR_EL1 survived
 +	eret
 +91:
-+	SWEET_MICRO 180, 0xff008888		// eret context sync survived
++	SWEET_MICRO 320, 0xff884400		// eret landed
++	SWEET_MICRO 180, 0xff008888
 +#endif
 +
  #if KASAN
  	mov	x20, x0
  	mov	x21, lr
-@@ -863,10 +1032,110 @@
+@@ -863,10 +1030,110 @@
  	bl		EXT(phystokv)
  
  	mov		lr, x19
