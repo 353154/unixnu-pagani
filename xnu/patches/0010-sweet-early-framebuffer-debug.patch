@@ -99,7 +99,7 @@ index d89b0f1..d0c710d 100644
  
  	flush_mmu_tlb();
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index ccbb188..eb07d5b 100644
+index ccbb188..108b630 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
 @@ -212,6 +212,26 @@ LEXT(ResetHandlerData)
@@ -205,25 +205,32 @@ index ccbb188..eb07d5b 100644
  
  	b		common_start
  
-@@ -741,10 +806,17 @@ common_start:
+@@ -741,9 +806,24 @@ common_start:
  #endif /* HAS_APPLE_PAC */
  
  	// Enable caches, MMU, ROP and JOP
 +#if defined(SWEET)
 +	SWEET_CHECKPOINT 220, 0xffff00ff
-+#endif
++	/*
++	 * Safe SCTLR for Qualcomm Oryon ARMv9.2 under Gunyah Hypervisor:
++	 * M=1, C=1, I=1, SPAN=1 (bit 23), RES1 bits, DZE=1, UCI=1
++	 */
++	MOV64   x0, (SCTLR_RESERVED | SCTLR_I_ENABLED | SCTLR_C_ENABLED | SCTLR_M_ENABLED | SCTLR_PAN_UNCHANGED | SCTLR_DZE_ENABLED | SCTLR_UCI_ENABLED)
++	MSR_SCTLR_EL1_X0
++	isb		sy
++	/* Explicitly clear PAN to allow EL1 access to early framebuffer in TTBR0 */
++	msr		PAN, #0
++	isb		sy
++	SWEET_CHECKPOINT 280, 0xff00ff00
++#else
  	MOV64   x0, SCTLR_EL1_DEFAULT
  	MSR_SCTLR_EL1_X0
  	isb		sy
- 
-+#if defined(SWEET)
-+	SWEET_CHECKPOINT 280, 0xff00ff00
 +#endif
-+
+ 
  #if !VMAPPLE && !defined(SWEET)
  	MOV64   x1, SCTLR_EL1_DEFAULT
- 	cmp		x0, x1
-@@ -794,6 +866,12 @@ common_start:
+@@ -794,6 +874,12 @@ common_start:
  	add		x0, x20, x22
  	sub		x0, x0, x23
  
