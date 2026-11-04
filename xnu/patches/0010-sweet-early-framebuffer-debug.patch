@@ -184,7 +184,7 @@ index ccbb188..7af7f7b 100644
  	and		$6, $1, #(ARM_TTE_BLOCK_L2_MASK)	// Get address bits of block mapping
  	orr		$6, $5, $6
  	mov		$5, $3
-@@ -456,13 +516,19 @@
+@@ -456,12 +516,18 @@
  	.globl EXT(start_first_cpu)
  LEXT(start_first_cpu)
  
@@ -196,14 +196,13 @@ index ccbb188..7af7f7b 100644
  
  	mov		x20, x0
  	mov		x21, #0
- 
++
 +#if defined(SWEET)
 +	SWEET_CHECKPOINT 100, 0xffffff00
 +#endif
-+
+ 
  	// Set low reset vector before attempting any loads
  	adrp	x0, EXT(LowExceptionVectorBase)@page
- 	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
 @@ -609,9 +675,45 @@
  	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
  	create_bootstrap_mapping x14, x15, x5, x3, x2, x9, x10, x11, x12, x13
@@ -309,7 +308,7 @@ index ccbb188..7af7f7b 100644
  
  #if !VMAPPLE && !defined(SWEET)
  	MOV64   x1, SCTLR_EL1_DEFAULT
-@@ -794,6 +944,13 @@
+@@ -794,6 +944,14 @@
  	add		x0, x20, x22
  	sub		x0, x0, x23
  
@@ -318,12 +317,18 @@ index ccbb188..7af7f7b 100644
 +	SWEET_CHECKPOINT 340, 0xff0088ff
 +	mov		x0, x19
 +	isb		sy				// deferred context sync (attribution probe)
++	SWEET_MICRO 180, 0xff008888		// isb survived
 +#endif
 +
  #if KASAN
  	mov	x20, x0
  	mov	x21, lr
-@@ -867,6 +1024,105 @@
+@@ -863,10 +1021,110 @@
+ 	bl		EXT(phystokv)
+ 
+ 	mov		lr, x19
++	SWEET_MICRO 220, 0xff880088		// first KVA fetch (phystokv) survived
+ 
  	/* Return to arm_init() */
  	ret
  
