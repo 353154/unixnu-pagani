@@ -6,12 +6,7 @@ set -euo pipefail
 bearssl_sha=7bea48e5e850ab4cafbe68d3765cdaba13a86d6f
 bearssl_tmp=$(mktemp -d)
 trap 'rm -rf "$bearssl_tmp"' EXIT
-git init -q "$bearssl_tmp"
-git -C "$bearssl_tmp" fetch -q --depth 1 \
-    https://github.com/nickray/bearssl.git "$bearssl_sha" || \
-git -C "$bearssl_tmp" fetch -q --depth 1 \
-    https://www.bearssl.org/git/BearSSL "$bearssl_sha"
-git -C "$bearssl_tmp" checkout -q FETCH_HEAD
+git clone -q --depth 1 https://github.com/nickray/bearssl.git "$bearssl_tmp"
 [[ "$(git -C "$bearssl_tmp" rev-parse HEAD)" == "$bearssl_sha" ]]
 python3 - "$bearssl_tmp" <<'PY'
 from pathlib import Path
