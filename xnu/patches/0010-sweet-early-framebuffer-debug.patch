@@ -102,7 +102,7 @@ diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
 index ccbb188..7af7f7b 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -212,6 +212,26 @@ LEXT(ResetHandlerData)
+@@ -212,6 +212,26 @@
  	.text
  
  
@@ -129,7 +129,7 @@ index ccbb188..7af7f7b 100644
  /*
   * __start trampoline is located at a position relative to LowResetVectorBase
   * so that iBoot can compute the reset vector position to set IORVBAR using
-@@ -220,6 +240,24 @@ LEXT(ResetHandlerData)
+@@ -220,6 +240,24 @@
  	.align	3
  	.globl EXT(_start)
  LEXT(_start)
@@ -154,7 +154,7 @@ index ccbb188..7af7f7b 100644
  	b	EXT(start_first_cpu)
  
  
-@@ -389,7 +427,11 @@ start_cpu:
+@@ -389,7 +427,11 @@
  	lsr		$4, $4, #(ARM_TTE_BLOCK_L2_SHIFT)	// Get index in L2 table for block entry
  	lsl		$4, $4, #(TTE_SHIFT)				// Convert index into pointer offset
  	add		$4, $2, $4							// Get L2 entry pointer
@@ -166,7 +166,7 @@ index ccbb188..7af7f7b 100644
  	and		$6, $1, #(ARM_TTE_BLOCK_L2_MASK)	// Get address bits of block mapping
  	orr		$6, $5, $6
  	mov		$5, $3
-@@ -456,13 +498,19 @@ start_cpu:
+@@ -456,13 +498,19 @@
  	.globl EXT(start_first_cpu)
  LEXT(start_first_cpu)
  
@@ -186,10 +186,12 @@ index ccbb188..7af7f7b 100644
  	// Set low reset vector before attempting any loads
  	adrp	x0, EXT(LowExceptionVectorBase)@page
  	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
-@@ -609,9 +657,45 @@ Lkernelcache_base_found:
+@@ -609,10 +657,46 @@
  	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
  	create_bootstrap_mapping x14, x15, x5, x3, x2, x9, x10, x11, x12, x13
  
+-	/* Ensure TTEs are visible */
+-	dsb		ish
 +#if defined(SWEET)
 +	/*
 +	 * Splash framebuffer: one 32MB Normal-NC block in the EXISTING V=P
@@ -207,9 +209,8 @@ index ccbb188..7af7f7b 100644
 +	add		x13, x25, #(2 * PGBYTES)
 +	str		x11, [x13, x12, lsl #TTE_SHIFT]
 +#endif
-+
- 	/* Ensure TTEs are visible */
--	dsb		ish
+ 
++	/* Ensure TTEs are visible */
 +#if defined(SWEET)
 +	/*
 +	 * Clean all bootstrap page tables to Point of Coherence (PoC).
@@ -230,10 +231,11 @@ index ccbb188..7af7f7b 100644
 +#if defined(SWEET)
 +	SWEET_CHECKPOINT 160, 0xff00ffff
 +#endif
- 
++
  	b		common_start
  
-@@ -741,9 +825,34 @@ common_start:
+ /*
+@@ -741,9 +825,41 @@
  #endif /* HAS_APPLE_PAC */
  
  	// Enable caches, MMU, ROP and JOP
@@ -248,6 +250,13 @@ index ccbb188..7af7f7b 100644
 +	 * 3. Clear C (bit 2): Keep D-Cache DISABLED to prevent Qualcomm XPU carveout faults!
 +	 * 4. Set M (bit 0), I (bit 12), SPAN (bit 23).
 +	 */
++	/* SWEET: install painted exception vectors so any abort after MMU-on
++	 * shows its slot color + ESR/FAR bit bands instead of a silent hang. */
++	adrp	x0, EXT(sweet_exc_vectors)@page
++	add		x0, x0, EXT(sweet_exc_vectors)@pageoff
++	msr		VBAR_EL1, x0
++	isb		sy
++
 +	mrs		x0, SCTLR_EL1
 +	bic		x0, x0, #(1 << 1)   // A = 0 (disable strict alignment faults)
 +	bic		x0, x0, #(1 << 2)   // C = 0 (keep D-Cache OFF to avoid Qualcomm XPU faults)
@@ -268,7 +277,7 @@ index ccbb188..7af7f7b 100644
  
  #if !VMAPPLE && !defined(SWEET)
  	MOV64   x1, SCTLR_EL1_DEFAULT
-@@ -794,6 +903,12 @@ common_start:
+@@ -794,6 +910,12 @@
  	add		x0, x20, x22
  	sub		x0, x0, x23
  
@@ -281,6 +290,112 @@ index ccbb188..7af7f7b 100644
  #if KASAN
  	mov	x20, x0
  	mov	x21, lr
+@@ -867,6 +989,105 @@
+ 	/* Return to arm_init() */
+ 	ret
+ 
++
++#if defined(SWEET)
++/*
++ * SWEET exception evidence vectors (installed as VBAR_EL1 in common_start
++ * just before MMU enable). Each of the 16 slots loads a distinct color and
++ * parks in Lsweet_exc_common, which paints:
++ *   row 600: 400x40 bar in the slot color (identifies the vector)
++ *   row 700: ESR_EL1 as 32 cells, leftmost cell = bit 31 (white=1, dark=0)
++ *   row 760: FAR_EL1 as 32 cells, same encoding
++ * arm_init replaces VBAR_EL1 once the kernel is far enough along.
++ */
++.macro SWEET_EXC_VEC color
++	.align 7
++	MOV64	x0, \color
++	b		Lsweet_exc_common
++.endmacro
++
++	.align 11
++	.globl EXT(sweet_exc_vectors)
++LEXT(sweet_exc_vectors)
++	SWEET_EXC_VEC 0xffff0000		//  0: sync,   current EL, SP0
++	SWEET_EXC_VEC 0xffff6a00		//  1: irq,    current EL, SP0
++	SWEET_EXC_VEC 0xffffff00		//  2: fiq,    current EL, SP0
++	SWEET_EXC_VEC 0xffb4ff00		//  3: serror, current EL, SP0
++	SWEET_EXC_VEC 0xff00ff00		//  4: sync,   current EL, SPx
++	SWEET_EXC_VEC 0xff00ff87		//  5: irq,    current EL, SPx
++	SWEET_EXC_VEC 0xff00ffff		//  6: fiq,    current EL, SPx
++	SWEET_EXC_VEC 0xff0090ff		//  7: serror, current EL, SPx
++	SWEET_EXC_VEC 0xff0000ff		//  8: sync,   lower EL, A64
++	SWEET_EXC_VEC 0xff6a00ff		//  9: irq,    lower EL, A64
++	SWEET_EXC_VEC 0xffb400ff		// 10: fiq,    lower EL, A64
++	SWEET_EXC_VEC 0xffff00ff		// 11: serror, lower EL, A64
++	SWEET_EXC_VEC 0xffffffff		// 12: sync,   lower EL, A32
++	SWEET_EXC_VEC 0xff909090		// 13: irq,    lower EL, A32
++	SWEET_EXC_VEC 0xff009090		// 14: fiq,    lower EL, A32
++	SWEET_EXC_VEC 0xff900030		// 15: serror, lower EL, A32
++
++Lsweet_exc_common:
++	/* x0 = slot color; paint a 400x40 bar at row 600. */
++	MOV64	x1, (0xfc800000 + 600 * 4864 + 100 * 4)
++	mov		x3, #40
++	mov		x4, #4864
++101:
++	mov		x5, #400
++	mov		x6, x1
++102:
++	str		w0, [x6], #4
++	subs	x5, x5, #1
++	b.ne	102b
++	add		x1, x1, x4
++	subs	x3, x3, #1
++	b.ne	101b
++
++	/* ESR_EL1 bit band at row 700. */
++	mrs		x7, ESR_EL1
++	MOV64	x1, (0xfc800000 + 700 * 4864 + 100 * 4)
++	bl		Lsweet_exc_bits
++
++	/* FAR_EL1 bit band at row 760. */
++	mrs		x7, FAR_EL1
++	MOV64	x1, (0xfc800000 + 760 * 4864 + 100 * 4)
++	bl		Lsweet_exc_bits
++
++	dsb		sy
++103:
++	wfe
++	b		103b
++
++/*
++ * x1 = band base, x7 = 64-bit value; x4 = stride. Clobbers x2,x3,x5,x6,
++ * x8..x11. Leaves x1 pointing past the last cell.
++ */
++Lsweet_exc_bits:
++	mov		x8, #31
++201:
++	lsr		x9, x7, x8
++	and		x9, x9, #1
++	MOV64	x10, 0xff202020
++	MOV64	x11, 0x00dfdfdf
++	mul		x11, x11, x9
++	orr		x10, x10, x11
++	mov		x2, x1
++	mov		x3, #40
++203:
++	mov		x5, #24
++	mov		x6, x2
++204:
++	str		w10, [x6], #4
++	subs	x5, x5, #1
++	b.ne	204b
++	add		x2, x2, x4
++	subs	x3, x3, #1
++	b.ne	203b
++	add		x1, x1, #(24 * 4)
++	subs	x8, x8, #1
++	b.pl	201b
++	ret
++#endif /* SWEET */
++
+ //#include	"globals_asm.h"
+ 
+ /* vim: set ts=4: */
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
 new file mode 100644
 index 0000000..2c727ea
