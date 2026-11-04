@@ -1,0 +1,26 @@
+diff --git a/osfmk/arm64/proc_reg.h b/osfmk/arm64/proc_reg.h
+index e01c124..c3d8a1f 100644
+--- a/osfmk/arm64/proc_reg.h
++++ b/osfmk/arm64/proc_reg.h
+@@ -860,6 +860,17 @@
+ #define TCR_TG1_GRANULE_16KB     (1ULL << TCR_TG1_GRANULE_SHIFT)
+ #define TCR_TG1_GRANULE_4KB      (2ULL << TCR_TG1_GRANULE_SHIFT)
+ #define TCR_TG1_GRANULE_64KB     (3ULL << TCR_TG1_GRANULE_SHIFT)
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++/*
++ * SWEET (Qualcomm Oryon, SM8750): Apple cores privately permute the
++ * TCR_EL1.TG1 encoding (1 = 16KB), and XNU's defaults above encode that
++ * Apple permutation. Oryon implements the ARM-standard encoding where
++ * TG1 = 2 selects the 16KB granule for TTBR1; with TG1 = 1 the MMU walks
++ * the high half with a 64KB layout against 16KB-built KVA tables, which
++ * derails the first high-half fetch into an XPU-protected walk and hangs
++ * the core silently (bisected to the bl phystokv in common_start).
++ */
++#undef TCR_TG1_GRANULE_16KB
++#define TCR_TG1_GRANULE_16KB     (2ULL << TCR_TG1_GRANULE_SHIFT)
++#endif
++
+ #if __ARM_16K_PG__
+ #define TCR_TG1_GRANULE_SIZE     (TCR_TG1_GRANULE_16KB)
+ #else
