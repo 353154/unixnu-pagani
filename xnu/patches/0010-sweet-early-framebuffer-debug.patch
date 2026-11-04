@@ -87,36 +87,46 @@ index d89b0f1..d0c710d 100644
  
  	flush_mmu_tlb();
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index ccbb188..777aca4 100644
+index ccbb188..ac553fb 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -463,6 +463,25 @@ LEXT(start_first_cpu)
- 	mov		x20, x0
- 	mov		x21, #0
- 
+@@ -220,6 +220,24 @@ LEXT(ResetHandlerData)
+ 	.align	3
+ 	.globl EXT(_start)
+ LEXT(_start)
 +#if defined(SWEET)
-+	/* Stage 0: white 400x100 band right under BootShim text, no stack or page tables needed. */
-+	MOV64	x0, (0xfc800000 + 400 * 4864 + 100 * 4)
-+	mov		w1, #-1
-+	mov		x2, #100
++	/* Stage 0: 400x100 white block drawn at the very first instruction of the kernel entry point! */
++	MOV64	x1, (0xfc800000 + 400 * 4864 + 100 * 4)
++	mov		w2, #-1
++	mov		x3, #100
 +	mov		x4, #4864
-+Lsweet_mark_row:
-+	mov		x3, #400
-+	mov		x5, x0
-+Lsweet_mark_pixel:
-+	str		w1, [x5], #4
++Lsweet_stage0_row:
++	mov		x5, #400
++	mov		x6, x1
++Lsweet_stage0_pixel:
++	str		w2, [x6], #4
++	subs	x5, x5, #1
++	b.ne	Lsweet_stage0_pixel
++	add		x1, x1, x4
 +	subs	x3, x3, #1
-+	b.ne	Lsweet_mark_pixel
-+	add		x0, x0, x4
-+	subs	x2, x2, #1
-+	b.ne	Lsweet_mark_row
++	b.ne	Lsweet_stage0_row
 +	dsb		sy
 +#endif
-+
- 	// Set low reset vector before attempting any loads
- 	adrp	x0, EXT(LowExceptionVectorBase)@page
- 	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
-@@ -609,6 +628,24 @@ Lkernelcache_base_found:
+ 	b	EXT(start_first_cpu)
+ 
+ 
+@@ -456,8 +474,10 @@ start_cpu:
+ 	.globl EXT(start_first_cpu)
+ LEXT(start_first_cpu)
+ 
++#if !defined(SWEET)
+ 	// Unlock the core for debugging
+ 	msr		OSLAR_EL1, xzr
++#endif
+ 	msr		DAIFSet, #(DAIFSC_ALL)				// Disable all interrupts
+ 
+ 	mov		x20, x0
+@@ -609,6 +629,24 @@ Lkernelcache_base_found:
  	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
  	create_bootstrap_mapping x14, x15, x5, x3, x2, x9, x10, x11, x12, x13
  
@@ -143,7 +153,7 @@ index ccbb188..777aca4 100644
  
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
 new file mode 100644
-index 0000000..8f4c808
+index 0000000..2c727ea
 --- /dev/null
 +++ b/osfmk/arm64/sweet_early.c
 @@ -0,0 +1,130 @@
