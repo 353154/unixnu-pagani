@@ -102,11 +102,10 @@ diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
 index ccbb188..7af7f7b 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -211,6 +211,44 @@
- 	.space  (rhdSize_NUM),0		// (filled with 0s)
+@@ -212,6 +212,44 @@
  	.text
  
-+
+ 
 +#if defined(SWEET)
 +.macro SWEET_CHECKPOINT x_off, color_val
 +	MOV64	x1, (0xfc800000 + 520 * 4864 + (\x_off) * 4)
@@ -144,9 +143,10 @@ index ccbb188..7af7f7b 100644
 +	b.ne	111b
 +.endmacro
 +#endif
- 
++
  /*
   * __start trampoline is located at a position relative to LowResetVectorBase
+  * so that iBoot can compute the reset vector position to set IORVBAR using
 @@ -220,6 +258,24 @@
  	.align	3
  	.globl EXT(_start)
@@ -184,7 +184,7 @@ index ccbb188..7af7f7b 100644
  	and		$6, $1, #(ARM_TTE_BLOCK_L2_MASK)	// Get address bits of block mapping
  	orr		$6, $5, $6
  	mov		$5, $3
-@@ -456,13 +516,19 @@
+@@ -456,12 +516,18 @@
  	.globl EXT(start_first_cpu)
  LEXT(start_first_cpu)
  
@@ -196,14 +196,13 @@ index ccbb188..7af7f7b 100644
  
  	mov		x20, x0
  	mov		x21, #0
- 
++
 +#if defined(SWEET)
 +	SWEET_CHECKPOINT 100, 0xffffff00
 +#endif
-+
+ 
  	// Set low reset vector before attempting any loads
  	adrp	x0, EXT(LowExceptionVectorBase)@page
- 	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
 @@ -609,9 +675,45 @@
  	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
  	create_bootstrap_mapping x14, x15, x5, x3, x2, x9, x10, x11, x12, x13
@@ -251,7 +250,7 @@ index ccbb188..7af7f7b 100644
  
  	b		common_start
  
-@@ -741,9 +843,44 @@
+@@ -741,9 +843,56 @@
  #endif /* HAS_APPLE_PAC */
  
  	// Enable caches, MMU, ROP and JOP
@@ -266,6 +265,18 @@ index ccbb188..7af7f7b 100644
 +	 * 3. Clear C (bit 2): Keep D-Cache DISABLED to prevent Qualcomm XPU carveout faults!
 +	 * 4. Set M (bit 0), I (bit 12), SPAN (bit 23).
 +	 */
++	/*
++	 * SWEET: apple_arm64_common.h defines __ARM_IC_NOALIAS_ICACHE__, which
++	 * compiles out XNU's own tlbi+ic iallu below. On the Qualcomm boot chain
++	 * (ABL/Gunyah) stale TLB entries and I-cache lines survive into this
++	 * code and freeze the core right after MMU-on (bisected to isb sy).
++	 * Mirror BootShim's proven sequence: ic iallu, tlbi vmalle1, dsb, isb.
++	 */
++	ic		iallu
++	tlbi	vmalle1
++	dsb		sy
++	isb		sy
++
 +	/* SWEET: install painted exception vectors so any abort after MMU-on
 +	 * shows its slot color + ESR/FAR bit bands instead of a silent hang. */
 +	adrp	x0, EXT(sweet_exc_vectors)@page
@@ -296,7 +307,7 @@ index ccbb188..7af7f7b 100644
  
  #if !VMAPPLE && !defined(SWEET)
  	MOV64   x1, SCTLR_EL1_DEFAULT
-@@ -794,6 +931,12 @@
+@@ -794,6 +943,12 @@
  	add		x0, x20, x22
  	sub		x0, x0, x23
  
@@ -309,7 +320,7 @@ index ccbb188..7af7f7b 100644
  #if KASAN
  	mov	x20, x0
  	mov	x21, lr
-@@ -867,6 +1010,105 @@
+@@ -867,6 +1022,105 @@
  	/* Return to arm_init() */
  	ret
  
