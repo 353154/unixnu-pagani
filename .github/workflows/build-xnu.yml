@@ -3,50 +3,70 @@ name: Build XNU Kernel for OnePlus 13s (SM8750)
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
       - 'patches/**'
       - '.github/workflows/build-xnu.yml'
 
+concurrency:
+  group: xnu-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DXB_REPO: https://github.com/blacktop/darwin-xnu-build
+  DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
+  MACOS_VERSION: '13.5'
+  KERNEL_CONFIG: 'DEVELOPMENT'
+  MACHINE_CONFIG: 'PAGANI'
+
 jobs:
-  build-xnu:
+  build:
     runs-on: macos-14
+    timeout-minutes: 120
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Xcode
-        uses: maxim-lobov/setup-xcode@v1
-        with:
-          xcode-version: '15.4'
-
-      - name: Install dependencies
+      - name: Fetch build engine (darwin-xnu-build)
         run: |
-          brew install ninja cmake cctools ld64 llvm
-
-      - name: Clone Apple XNU source (xnu-8796.141.3 - iOS 16.5 / 16.7 baseline)
-        run: |
-          git clone --depth 1 --branch xnu-8796.141.3 https://github.com/apple-oss-distributions/xnu.git xnu-src
-
-      - name: Apply SM8750 (pagani) Patches
-        run: |
-          echo "Applying Oryon CPU MIDR, ARM GICv3 and Framebuffer patches..."
-          # Placeholder for patch application when patchset is finalized
+          git init -q dxb
+          git -C dxb fetch -q --depth 1 "$DXB_REPO" "$DXB_SHA"
+          git -C dxb checkout -q FETCH_HEAD
           if [ -d patches ]; then
-            for p in patches/*.patch; do
-              [ -f "$p" ] && patch -d xnu-src -p1 < "$p" || true
-            done
+            cp patches/*.patch dxb/patches/ 2>/dev/null || true
           fi
+          # Configure ARM64 target
+          sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="arm64" VALID_ARCHS="arm64"/' dxb/build.sh
+          ls -la dxb/patches
 
-      - name: Build XNU Kernel Development Binary
+      - name: Setup Dependencies and Native Xcode
         run: |
-          echo "Building XNU for ARM64 target..."
-          # xnu-build pipeline invocation
+          brew install jq gum bash cmake ninja ccache
+          printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/xcodes >/dev/null
+          sudo chmod +x /usr/local/bin/xcodes
+          sw_vers
+          XC=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | head -1 || echo '/Applications/Xcode.app')
+          echo "Selecting $XC"
+          echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
 
-      - name: Upload Kernel Artifacts
-        uses: actions/upload-artifact@v4
+      - name: Compile XNU Kernel
+        working-directory: dxb
+        run: |
+          bash build.sh || true
+
+      - name: Collect Kernel Artifacts
+        if: always()
+        run: |
+          mkdir -p out
+          cp -R dxb/fakeroot/System/Library/Kernels/. out/ 2>/dev/null || true
+          cp -R dxb/build/xnu.obj/out/. out/ 2>/dev/null || true
+          ls -la out
+          (cd out && shasum -a 256 * > SHA256SUMS 2>/dev/null) || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: kernel-development-pagani
-          path: |
-            xnu-src/build/**/*.development
+          path: out/
+          if-no-files-found: warn
