@@ -1,0 +1,13 @@
+diff --git a/osfmk/arm/cpuid.h b/osfmk/arm/cpuid.h
+index be69921..5d24398 100644
+--- a/osfmk/arm/cpuid.h
++++ b/osfmk/arm/cpuid.h
+@@ -61,6 +61,8 @@ typedef union {
+ #define CPU_VID_MARVELL  0x56 // Marvell Semiconductor Inc.
+ #define CPU_VID_INTEL    0x69 // Intel ARM parts.
+ #define CPU_VID_APPLE    0x61 // Apple Inc.
++#define CPU_VID_QUALCOMM 0x51 // Qualcomm Technologies, Inc.
++#define CPU_PART_QUALCOMM_ORYON 0x001 // Snapdragon 8 Elite Oryon
+ 
+ 
+ /* ARM Architecture Codes */

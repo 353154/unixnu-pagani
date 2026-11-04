@@ -1,0 +1,3 @@
+Physical size: 1216x2640
+Physical density: 560
+Override density: 476
