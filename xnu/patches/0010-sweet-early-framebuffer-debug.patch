@@ -320,15 +320,15 @@ index ccbb188..7af7f7b 100644
 +	SWEET_CHECKPOINT 340, 0xff0088ff
 +	SWEET_MICRO 260, 0xff880000		// CP5 trailing dsb sy retired
 +	mov		x0, x19
-+	adr		x9, 91f
-+	msr		ELR_EL1, x9
-+	SWEET_MICRO 280, 0xff008800		// msr ELR_EL1 survived
-+	mov		x10, #0x3c5
-+	msr		SPSR_EL1, x10
-+	SWEET_MICRO 300, 0xff000088		// msr SPSR_EL1 survived
-+	eret
-+91:
-+	SWEET_MICRO 320, 0xff884400		// eret landed
++	/*
++	 * v6 verdict: isb AND eret (both context synchronization events) freeze
++	 * the core with M=1; every non-CSE instruction survives. Run this window
++	 * CSE-free: no isb, no eret - plain fall-through. Empirically safe (v3
++	 * executed 40+ instructions post-MMU-on without any sync).
++	 */
++	SWEET_MICRO 280, 0xff008800		// CSE-free fall-through
++	SWEET_MICRO 300, 0xff000088
++	SWEET_MICRO 320, 0xff884400
 +	SWEET_MICRO 180, 0xff008888
 +#endif
 +
