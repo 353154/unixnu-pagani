@@ -70,7 +70,7 @@ diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
  
  	// From here on out, we're off the bootstrap translation tables.
  
-@@ -2259,10 +2293,17 @@
+@@ -2259,21 +2293,26 @@
      }
  #endif
  #endif
@@ -175,7 +175,7 @@ diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
 +	sweet_early_mark(9, "kernel framebuffer VA live");
 +}
 +
- void
++void
  sweet_early_disable(void)
  {
 -	sweet_early_mark(8, "leaving bootstrap TTBR0");
@@ -225,7 +225,7 @@ diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
  
  	if (debug_boot_arg) {
  		patch_low_glo();
-@@ -535,9 +536,20 @@
+@@ -535,9 +536,16 @@
  	PE_consistent_debug_inherit();
  
  	/* Setup debugging output. */
@@ -242,7 +242,7 @@ diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
  
  	serialmode = 0;
  	if (PE_parse_boot_argn("serial", &serialmode, sizeof(serialmode))) {
-@@ -569,6 +581,9 @@
+@@ -569,10 +581,13 @@
  		(void)switch_to_serial_console(); /* Switch into serial mode from video console */
  		disableConsoleOutput = FALSE;     /* Allow printfs to happen */
  	}
@@ -275,7 +275,7 @@ diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
  
  #if APPLE_ARM64_ARCH_FAMILY
  	configure_late_apple_regs();
-@@ -596,8 +614,10 @@
+@@ -596,14 +614,17 @@
  #endif
  
  	cpu_timebase_init(TRUE);
@@ -291,15 +291,16 @@ diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
  	fiq_context_init(TRUE);
 +	sweet_early_mark(29, "fiq_context_init done");
  
+ 
  #if HIBERNATION
-@@ -628,6 +648,7 @@
+@@ -628,5 +648,6 @@
  	gDramBase = *dram_base;
  	gDramSize = *dram_size;
 +	sweet_early_mark(30, "dram props set in chosen");
  
  	/*
  	 * Initialize the stack protector for all future calls
-@@ -647,6 +668,7 @@
+@@ -647,5 +668,6 @@
  	 * against string vulnerabilities
  	 */
  	__stack_chk_guard &= ~(0xFFULL << 8);

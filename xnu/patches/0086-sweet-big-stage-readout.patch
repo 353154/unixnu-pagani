@@ -1,0 +1,61 @@
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -86,12 +86,57 @@
+ 	}
+ }
+ 
++/*
++ * A checkpoint number this large is legible in any hand-held photo of the
++ * panel, unlike the 16x32 console cells: the last number drawn is the last
++ * initialiser that ran, and it is drawn on the same framebuffer path as the
++ * early console so it survives a dead video console.
++ */
++#define BIG_SCALE 8u
++#define BIG_X     24u
++#define BIG_Y     1180u
++
++static void
++sweet_early_big_number(unsigned int value)
++{
++	char digits[3];
++	unsigned int count = 0, x = BIG_X;
++
++	if (value >= 100) {
++		digits[count++] = (char)('0' + (value / 100) % 10);
++	}
++	if (value >= 10) {
++		digits[count++] = (char)('0' + (value / 10) % 10);
++	}
++	digits[count++] = (char)('0' + value % 10);
++
++	for (unsigned int d = 0; d < count; d++) {
++		const unsigned char *glyph = iso_font + (unsigned char)digits[d] * 16;
++		for (unsigned int gy = 0; gy < 16; gy++) {
++			for (unsigned int sy = 0; sy < BIG_SCALE; sy++) {
++				volatile uint32_t *line = EARLY_FB +
++				    (BIG_Y + gy * BIG_SCALE + sy) * EARLY_STRIDE + x;
++				for (unsigned int gx = 0; gx < 8; gx++) {
++					uint32_t pixel = (glyph[gy] & (1u << gx)) ?
++					    0xffff2020u : 0xff000000u;
++					for (unsigned int sx = 0; sx < BIG_SCALE; sx++) {
++						line[gx * BIG_SCALE + sx] = pixel;
++					}
++				}
++			}
++		}
++		x += 8u * BIG_SCALE + 16u;
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
+ void
+ sweet_early_mark(unsigned int stage, const char *label)
+ {
+ 	if (early_disabled || stage > 40) {
+ 		return;
+ 	}
++	sweet_early_big_number(stage);
+ 	uint32_t color = 0xff00ff00u | ((stage & 7u) * 32u << 16);
+ 	for (unsigned int y = EARLY_HEIGHT - 32; y < EARLY_HEIGHT; y++) {
+ 		for (unsigned int x = stage * 28; x < (stage + 1) * 28 && x < EARLY_WIDTH; x++) {

@@ -1,3 +1,40 @@
+diff --git a/osfmk/arm/io_map.c b/osfmk/arm/io_map.c
+--- a/osfmk/arm/io_map.c
++++ b/osfmk/arm/io_map.c
+@@ -60,6 +60,8 @@
+ #include <arm/pmap.h>
+ #include <san/kasan.h>
+ 
++extern void kprintf(const char *fmt, ...);
++
+ extern vm_offset_t virtual_space_start;     /* Next available kernel VA */
+ 
+ #define IO_MAP_SIZE            (8ul << 20)
+@@ -96,6 +98,10 @@
+ 	vm_offset_t alloc_size   = round_page(size + start_offset);
+ 	vm_offset_t start;
+ 
++	kprintf("SWE00 io_map ph=%lx sz=%lx alloc=%lx phase=%d\n",
++	    (unsigned long)phys_addr, (unsigned long)size,
++	    (unsigned long)alloc_size, (int)startup_phase);
++
+ 	phys_addr = trunc_page(phys_addr);
+ 
+ 	if (startup_phase < STARTUP_SUB_KMEM) {
+@@ -125,9 +131,12 @@
+ 			kmaflags |= KMA_PERMANENT;
+ 		}
+ 
++		kprintf("SWE01 kmem_alloc in sz=%lx\n", (unsigned long)alloc_size);
+ 		kmem_alloc(unmappable ? kernel_map : io_submap,
+ 		    &start, alloc_size, kmaflags, VM_KERN_MEMORY_IOKIT);
++		kprintf("SWE02 kmem_alloc out start=%lx\n", (unsigned long)start);
+ 		pmap_map(start, phys_addr, phys_addr + alloc_size, prot, flags);
++		kprintf("SWE03 pmap_map done\n");
+ 	}
+ 	return start + start_offset;
+ }
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
 --- a/osfmk/console/video_console.c
 +++ b/osfmk/console/video_console.c
 @@ -95,6 +95,7 @@
@@ -8,103 +45,46 @@
  
  #include <vm/pmap.h>
  #include <vm/vm_kern.h>
-@@ -2792,6 +2793,9 @@
+@@ -2792,6 +2793,8 @@
  initialize_screen(PE_Video * boot_vinfo, unsigned int op)
  {
  	unsigned int newMapSize = 0;
-+	if (startup_phase >= STARTUP_SUB_KPRINTF) {
-+		kprintf("SWD00 isc op=%d kmap=%d\n", op, kernel_map != VM_MAP_NULL);
-+	}
++
++	kprintf("SWD00 isc op=%d kmap=%d\n", op, kernel_map != VM_MAP_NULL);
  	vm_offset_t newVideoVirt = 0;
  	boolean_t graphics_now;
  	uint32_t delay;
-@@ -2872,7 +2876,14 @@
+@@ -2872,7 +2875,10 @@
  				} else {
  					newMapSize = (unsigned int) round_page(new_vinfo.v_height * new_vinfo.v_rowbytes);                      /* Remember size */
  				}
-+				if (startup_phase >= STARTUP_SUB_KPRINTF) {
-+					kprintf("SWD01 fb map phys=%llx size=%x\n",
-+					    new_vinfo.v_physaddr, newMapSize);
-+				}
++				kprintf("SWD01 fb map phys=%llx size=%x\n",
++				    new_vinfo.v_physaddr, newMapSize);
  				newVideoVirt = ml_io_map_unmappable((vm_map_offset_t)new_vinfo.v_physaddr, newMapSize, flags);   /* Allocate address space for framebuffer */
-+				if (startup_phase >= STARTUP_SUB_KPRINTF) {
-+					kprintf("SWD02 fb virt=%lx\n", newVideoVirt);
-+				}
++				kprintf("SWD02 fb virt=%lx\n", newVideoVirt);
  			}
  			new_vinfo.v_baseaddr = newVideoVirt + boot_vinfo->v_offset;                     /* Set the new framebuffer address */
  		}
-@@ -2921,7 +2932,13 @@
+@@ -2921,7 +2927,9 @@
  			gc_ops.hide_cursor  = vc_reverse_cursor;
  			gc_ops.show_cursor  = vc_reverse_cursor;
  			gc_ops.update_color = vc_update_color;
-+			if (startup_phase >= STARTUP_SUB_KPRINTF) {
-+				kprintf("SWD03 gc_initialize in\n");
-+			}
++			kprintf("SWD03 gc_initialize in\n");
  			gc_initialize(&vinfo);
-+			if (startup_phase >= STARTUP_SUB_KPRINTF) {
-+				kprintf("SWD04 gc_initialize done\n");
-+			}
++			kprintf("SWD04 gc_initialize out\n");
  		}
  	}
  
-@@ -2959,9 +2976,18 @@
+@@ -2959,9 +2967,12 @@
  		}
  
  #if !defined(XNU_TARGET_OS_BRIDGE)
-+		if (startup_phase >= STARTUP_SUB_KPRINTF) {
-+			kprintf("SWD05 vc_progress_set delay=%d gfx=%d\n", delay, graphics_now);
-+		}
++		kprintf("SWD05 vc_progress_set delay=%d gfx=%d\n", delay, graphics_now);
  		vc_progress_set( graphics_now, delay );
  #endif /* !defined(XNU_TARGET_OS_BRIDGE) */
-+		if (startup_phase >= STARTUP_SUB_KPRINTF) {
-+			kprintf("SWD06 gc_enable in\n");
-+		}
++		kprintf("SWD06 gc_enable in\n");
  		gc_enable( !graphics_now );
-+		if (startup_phase >= STARTUP_SUB_KPRINTF) {
-+			kprintf("SWD07 gc_acquired\n");
-+		}
++		kprintf("SWD07 gc_acquired\n");
  		gc_acquired = TRUE;
  		gc_desire_text = FALSE;
  		break;
---- a/osfmk/arm/io_map.c
-+++ b/osfmk/arm/io_map.c
-@@ -59,6 +59,8 @@
- #include <vm/vm_map.h>
- #include <arm/pmap.h>
- #include <san/kasan.h>
-+#include <kern/startup.h>
-+#include <kern/printf.h>
- 
- extern vm_offset_t virtual_space_start;     /* Next available kernel VA */
- 
-@@ -96,6 +98,11 @@
- 	vm_offset_t alloc_size   = round_page(size + start_offset);
- 	vm_offset_t start;
- 
-+	if (startup_phase >= STARTUP_SUB_KPRINTF) {
-+		kprintf("SWE00 io_map ph=%lx sz=%lx phase=%d\n",
-+		    (unsigned long)phys_addr, (unsigned long)size, startup_phase);
-+	}
-+
- 	phys_addr = trunc_page(phys_addr);
- 
- 	if (startup_phase < STARTUP_SUB_KMEM) {
-@@ -125,9 +132,18 @@
- 			kmaflags |= KMA_PERMANENT;
- 		}
- 
-+		if (startup_phase >= STARTUP_SUB_KPRINTF) {
-+			kprintf("SWE01 kmem_alloc sz=%lx\n", (unsigned long)alloc_size);
-+		}
- 		kmem_alloc(unmappable ? kernel_map : io_submap,
- 		    &start, alloc_size, kmaflags, VM_KERN_MEMORY_IOKIT);
-+		if (startup_phase >= STARTUP_SUB_KPRINTF) {
-+			kprintf("SWE02 alloc start=%lx\n", (unsigned long)start);
-+		}
- 		pmap_map(start, phys_addr, phys_addr + alloc_size, prot, flags);
-+		if (startup_phase >= STARTUP_SUB_KPRINTF) {
-+			kprintf("SWE03 pmap_map done\n");
-+		}
- 	}
- 	return start + start_offset;
- }
