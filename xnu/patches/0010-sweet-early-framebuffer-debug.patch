@@ -228,60 +228,64 @@ index ccbb188..e053fb5 100644
  	// Set low reset vector before attempting any loads
  	adrp	x0, EXT(LowExceptionVectorBase)@page
  	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
-@@ -609,9 +693,79 @@ Lkernelcache_base_found:
+@@ -609,9 +693,83 @@ Lkernelcache_base_found:
  	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
  	create_bootstrap_mapping x14, x15, x5, x3, x2, x9, x10, x11, x12, x13
  
 +#if defined(SWEET)
 +	/*
-+	 * Splash framebuffer: one 32MB Normal-NC block in the EXISTING V=P
-+	 * L2 table. Both framebuffer and RAM use L1 index 0; another call to
-+	 * create_bootstrap_mapping would replace the RAM L2 table.
-+	 * SWEET uses 16K pages and all bring-up RAM is below 4GB, so the first
-+	 * V=P L2 page is bootstrap_pagetables + 2*PGBYTES.
-+	 * L2 blocks are 32MB (0x02000000) aligned, covering 0xfc000000..0xfdffffff.
++	 * 4KB granule 3-level bootstrap page tables (T0SZ=25, T1SZ=25):
++	 * - Page 0 (x25 + 0*PGBYTES): TTBR0 L1 root table
++	 * - Page 1 (x25 + 1*PGBYTES): TTBR1 L1 root table
++	 * - Page 2 (x25 + 2*PGBYTES): TTBR0 L2 table for L1[2] (0x80000000..0xbfffffff)
++	 * - Page 3 (x25 + 3*PGBYTES): TTBR1 L2 table for L1[448] (0xfffffff000000000..0xfffffff03fffffff)
++	 * - Page 4 (x25 + 4*PGBYTES): TTBR0 L2 table for L1[3] (0xc0000000..0xffffffff, splash FB)
 +	 */
-+	MOV64	x10, 0xfc000000
-+	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_INNER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
-+	orr		x11, x11, x10
-+	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
-+	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
-+	add		x13, x25, #(2 * PGBYTES)
-+	str		x11, [x13, x12, lsl #TTE_SHIFT]
++	add		x3, x25, #PGBYTES				// TTBR1 L1 root PA
++	add		x10, x25, #(2 * PGBYTES)		// TTBR0 RAM L2 PA
++	orr		x11, x10, #(ARM_TTE_TYPE_TABLE | ARM_TTE_VALID)
++	str		x11, [x25, #(2 * 8)]			// TTBR0 L1[2]
 +
-+	/*
-+	 * v12: Explicitly write KVA L1 and L2 bootstrap mappings.
-+	 * Kernel virtual space begins at 0xfffffe0007004000.
-+	 * L1 index = VA[46:36] = 0x7e0 (covers 0xfffffe0000000000..0xfffffe0ffffffff).
-+	 * KVA L1 root table is at x25 + PGBYTES.
-+	 * KVA L2 table is at x25 + 3 * PGBYTES.
-+	 */
-+	add		x3, x25, #PGBYTES				// x3 = KVA L1 root PA
-+	add		x10, x25, #(3 * PGBYTES)		// x10 = KVA L2 table PA
-+	MOV64	x11, (ARM_TTE_TYPE_TABLE | ARM_TTE_VALID)
-+	orr		x11, x11, x10
-+	MOV64	x12, (0x7e0 * 8)
-+	add		x12, x3, x12				// KVA L1 entry pointer
-+	str		x11, [x12]
++	add		x12, x25, #(3 * PGBYTES)		// TTBR1 KVA L2 PA
++	orr		x11, x12, #(ARM_TTE_TYPE_TABLE | ARM_TTE_VALID)
++	str		x11, [x3, #(0x1c0 * 8)]			// TTBR1 L1[448] (0xfffffff000000000)
 +
-+	/*
-+	 * L2 Block 3..6: VA 0xfffffe0006000000..0x0dffffff (128MB) -> PA 0xb0000000
-+	 * Memory attribute: Normal Write-Back, Outer Shareable, Access Flag, Valid Block
-+	 */
++	/* Map 64x 2MB blocks (128MB: 0xb0000000..0xb7ffffff) in TTBR0 L2[384..447] and TTBR1 L2[48..111] */
 +	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITEBACK) | ARM_TTE_BLOCK_AF)
-+	MOV64	x12, 0xb0000000
-+	orr		x13, x11, x12
-+	str		x13, [x10, #(3 * 8)]
-+	MOV64	x14, (32 * 1024 * 1024)
-+	add		x12, x12, x14
-+	orr		x13, x11, x12
-+	str		x13, [x10, #(4 * 8)]
-+	add		x12, x12, x14
-+	orr		x13, x11, x12
-+	str		x13, [x10, #(5 * 8)]
-+	add		x12, x12, x14
-+	orr		x13, x11, x12
-+	str		x13, [x10, #(6 * 8)]
++	MOV64	x13, 0xb0000000
++	orr		x11, x11, x13
++	add		x10, x10, #(384 * 8)			// TTBR0 L2[384] (0xb0000000)
++	add		x12, x12, #(48 * 8)				// TTBR1 L2[48]  (0xfffffff006000000)
++	mov		x14, #64
++Lsweet_ram_l2_loop:
++	str		x11, [x10], #8
++	str		x11, [x12], #8
++	add		x11, x11, #(ARM_TT_L2_SIZE)
++	subs	x14, x14, #1
++	b.ne	Lsweet_ram_l2_loop
++
++	/* Zero Page 4 (x25 + 4*PGBYTES) and map splash framebuffer 0xfc000000..0xfdffffff (16x 2MB blocks) */
++	add		x10, x25, #(4 * PGBYTES)
++	mov		x12, x10
++	mov		x14, #(PGBYTES / 16)
++Lsweet_zero_fb_l2:
++	stp		xzr, xzr, [x12], #16
++	subs	x14, x14, #1
++	b.ne	Lsweet_zero_fb_l2
++
++	orr		x11, x10, #(ARM_TTE_TYPE_TABLE | ARM_TTE_VALID)
++	str		x11, [x25, #(3 * 8)]			// TTBR0 L1[3] (0xc0000000..0xffffffff)
++
++	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
++	MOV64	x13, 0xfc000000
++	orr		x11, x11, x13
++	add		x10, x10, #(480 * 8)			// TTBR0 L2[480] (0xfc000000)
++	mov		x14, #16
++Lsweet_fb_l2_loop:
++	str		x11, [x10], #8
++	add		x11, x11, #(ARM_TT_L2_SIZE)
++	subs	x14, x14, #1
++	b.ne	Lsweet_fb_l2_loop
 +#endif
 +
  	/* Ensure TTEs are visible */
@@ -309,7 +313,7 @@ index ccbb188..e053fb5 100644
  
  	b		common_start
  
-@@ -741,9 +895,57 @@ common_start:
+@@ -741,9 +899,52 @@ common_start:
  #endif /* HAS_APPLE_PAC */
  
  	// Enable caches, MMU, ROP and JOP
@@ -321,14 +325,11 @@ index ccbb188..e053fb5 100644
 +	 * 1. Clear WXN (bit 19): If WXN=1, writable pages (our V=P identity map) become XN,
 +	 *    causing instant Instruction Abort on the very next instruction!
 +	 * 2. Clear A (bit 1): Disable strict alignment checks during early bootstrap.
-+	 * 3. Clear C (bit 2): Keep D-Cache DISABLED to prevent Qualcomm XPU carveout faults!
-+	 * 4. Set M (bit 0), I (bit 12), SPAN (bit 23).
++	 * 3. Set C (bit 2), M (bit 0), I (bit 12), SPAN (bit 23).
 +	 */
 +	/*
 +	 * SWEET: apple_arm64_common.h defines __ARM_IC_NOALIAS_ICACHE__, which
-+	 * compiles out XNU's own tlbi+ic iallu below. On the Qualcomm boot chain
-+	 * (ABL/Gunyah) stale TLB entries and I-cache lines survive into this
-+	 * code and freeze the core right after MMU-on (bisected to isb sy).
++	 * compiles out XNU's own tlbi+ic iallu below.
 +	 * Mirror BootShim's proven sequence: ic iallu, tlbi vmalle1, dsb, isb.
 +	 */
 +	ic		iallu
@@ -345,17 +346,15 @@ index ccbb188..e053fb5 100644
 +
 +	mrs		x0, SCTLR_EL1
 +	bic		x0, x0, #(1 << 1)   // A = 0 (disable strict alignment faults)
-+	orr		x0, x0, #(1 << 2)   // C = 1 (BootShim proven config: M|C|I; C=0 was never bisected)
++	orr		x0, x0, #(1 << 2)   // C = 1 (enable D-Cache)
 +	bic		x0, x0, #(1 << 19)  // WXN = 0 (CRITICAL: prevent writable identity map from being XN!)
 +	orr		x0, x0, #(1 << 0)   // M = 1 (enable MMU)
 +	orr		x0, x0, #(1 << 12)  // I = 1 (enable I-Cache)
 +	orr		x0, x0, #(1 << 23)  // SPAN = 1 (keep PAN clear across exceptions)
 +	SWEET_CHECKPOINT 250, 0xffffffff
 +	MSR_SCTLR_EL1_X0
++	isb		sy
 +	SWEET_CHECKPOINT 265, 0xffff8800
-+	/* CP3B painted above ends with dsb sy; marker proves the dsb retired.
-+	 * isb deferred to after CP5 as an attribution probe: if the core dies
-+	 * there but reaches CP5, the isb instruction itself is the killer. */
 +	SWEET_MICRO 100, 0xff00ff88
 +	SWEET_MICRO 140, 0xffff00aa
 +	SWEET_CHECKPOINT 280, 0xff00ff00
@@ -367,7 +366,7 @@ index ccbb188..e053fb5 100644
  
  #if !VMAPPLE && !defined(SWEET)
  	MOV64   x1, SCTLR_EL1_DEFAULT
-@@ -794,6 +996,75 @@ common_start:
+@@ -794,6 +994,67 @@ common_start:
  	add		x0, x20, x22
  	sub		x0, x0, x23
  
@@ -381,17 +380,11 @@ index ccbb188..e053fb5 100644
 +
 +	SWEET_CHECKPOINT 340, 0xff0088ff
 +	SWEET_MICRO 260, 0xff880000		// CP5 trailing dsb sy retired
-+	/*
-+	 * v6 verdict: isb AND eret (both context synchronization events) freeze
-+	 * the core with M=1; every non-CSE instruction survives. Run this window
-+	 * CSE-free: no isb, no eret - plain fall-through.
-+	 */
-+	SWEET_MICRO 280, 0xff008800		// CSE-free fall-through
++	SWEET_MICRO 280, 0xff008800
 +	SWEET_MICRO 300, 0xff000088
 +	SWEET_MICRO 320, 0xff884400
 +	SWEET_MICRO 180, 0xff008888
-+	/* Paint live TCR_EL1 as a 32-cell bit band at row 900 (x=100):
-+	 * verifies on-device that TG1 (bits 31:30) == 0b10 after 0083. */
++	/* Paint live TCR_EL1 as a 32-cell bit band at row 900 (x=100) */
 +	mov		x4, #4864
 +	mrs		x7, TCR_EL1
 +	MOV64	x1, (0xfc800000 + 900 * 4864 + 100 * 4)
@@ -405,9 +398,8 @@ index ccbb188..e053fb5 100644
 +	 */
 +	mrs		x7, TTBR1_EL1
 +	and		x7, x7, #(TTBR_BADDR_MASK)		// KVA L1 base PA
-+	MOV64	x0, 0xfffffe000748b488			// probed KVA
-+	lsr		x8, x0, #36						// L1 index = VA[46:36]
-+	and		x8, x8, #0x7ff
++	and		x8, x27, #(ARM_TT_L1_INDEX_MASK)
++	lsr		x8, x8, #(ARM_TT_L1_SHIFT)
 +	add		x9, x7, x8, lsl #3
 +	ldr		x10, [x9]						// KVA L1 descriptor
 +	mov		x15, x10						// PRESERVE x10 in x15 across bl!
@@ -416,9 +408,8 @@ index ccbb188..e053fb5 100644
 +	MOV64	x1, (0xfc800000 + 1020 * 4864 + 100 * 4)
 +	bl		Lsweet_exc_bits
 +	and		x7, x15, #(ARM_TTE_TABLE_MASK)	// L2 base from preserved descriptor
-+	MOV64	x0, 0xfffffe000748b488			// re-load probed KVA
-+	lsr		x8, x0, #25						// L2 index = VA[35:25]
-+	and		x8, x8, #0x7ff
++	and		x8, x27, #(ARM_TT_L2_INDEX_MASK)
++	lsr		x8, x8, #(ARM_TT_L2_SHIFT)
 +	add		x9, x7, x8, lsl #3
 +	ldr		x10, [x9]						// KVA L2 descriptor
 +	mov		x4, #4864
@@ -443,7 +434,7 @@ index ccbb188..e053fb5 100644
  #if KASAN
  	mov	x20, x0
  	mov	x21, lr
-@@ -867,6 +1138,165 @@ arm_init_tramp:
+@@ -867,6 +1127,161 @@ arm_init_tramp:
  	/* Return to arm_init() */
  	ret
  
@@ -548,10 +539,6 @@ index ccbb188..e053fb5 100644
 +	.align 4
 +	.globl EXT(sweet_kva_probe)
 +LEXT(sweet_kva_probe)
-+	/* Clear PAN to guarantee EL1 can write to identity-mapped framebuffer */
-+	msr		pan, #0
-+	isb		sy
-+
 +	/*
 +	 * CP6A: We are now running via TTBR1 in KVA space!
 +	 * Paint a huge 100x100 bright cyan block at row 520, col 300.

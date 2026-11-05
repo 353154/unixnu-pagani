@@ -616,3 +616,91 @@ KVA L1 合法 → 硬件 walk 进入 L2 → L2 条目内容错误(0xA30) → 翻
 2. **KVA 预读探测（Pre-jump Probe）**：在平坦模式下执行 `ldr w11, [lr]`。若 TTBR1 走表读内存成功，立即在 `(520, 240)` 绘制 30x30 纯白方块；若失败直接被物理 VBAR 捕获！
 3. **消除 RAS 干扰**：改用 `mov x12, lr; br x12` 进行绝对间接跳转，不触碰微架构 RAS 返回地址预测器。
 4. **清除 PAN**：在 `sweet_kva_probe` 开头执行 `msr pan, #0; isb sy`，确保 EL1 内核态访问低半区 Framebuffer 时不受硬件权限阻断。
+
+### 7.23 v18 本地秒级探针工作流与终极硬件真相：Oryon `ID_AA64MMFR0_EL1.TGran16 == 0`（仅支持 4KB 页粒度）(2026-11-05 16:00 ~ 17:00)
+
+为了摆脱每次 GitHub Actions 云端编译耗时 15 分钟的瓶颈，我们在本地建立了基于 `out/kernel.development.sweet`（备份于 `out/kernel.development.sweet.v18.bak`）的 **2 秒级二进制汇编探针工作流**，并通过 5 轮高密度真机实验，彻底揭开了所有 `isb` / `eret` / KVA 跳转冻结的终极硬件真相：
+
+#### 1. 破获 `mkadt.py` 1.2GB RAM 跨越 Qualcomm XPU 防火墙保护区
+- 使用 `scripts/parse_dtb.py` 解析一加 13s 固件提取的 `firmware_dump/dtbs/dtb_05.dtb`，发现 `/reserved-memory` 在 `0xb0000000..0xfd000000` 之间存在多块高通 XPU 硬件防火墙保护区：
+  - `xbl_ramdump_region@b8000000` (`0xb8000000..0xb81c0000`)
+  - `gunyah_hyp_region1@bd930000` (`0xbd930000..0xbe130000`)
+  - `tz_merged_region@d8000000` (`0xd8000000..0xd8600000`)
+  - `trust_ui_vm_region@f3800000`、`oem_vm_region@f7c00000`
+- 修改 [`tools/mkadt.py`](file:///Users/damon/unixnu-pagani/tools/mkadt.py#L16) 将早期 `MEM_SIZE` 从 `0x4d000000`（1.2GB）收敛为 `0x08000000`（128MB，`0xb0000000..0xb8000000`），避开 `0xb8000000` 起的全部 XPU 保护区（真机屏幕确认 `PHYS base=B0000000 size=07F00000`）。
+
+#### 2. 破获 `sweet_kva_probe` 入口的 `msr pan, #0` 非法指令
+- 反汇编 `out/kernel.development.sweet` 发现 `0xfffffe000748e880`（`_sweet_kva_probe` 首条指令）处的 `msr pan, #0` 在 `-march=armv8.2-a` 下被编码为 `9f 40 00 d5`（`msr S0_0_C4_C0_4, xzr`），在未启用 PAN 或特定微架构下会直接触发同步异常，因此将其替换为 `nop; nop`。
+
+#### 3. 破获为何 v3~v18 在 `MSR_SCTLR_EL1_X0` 后能继续执行 40+ 条指令
+- 实验 1：在 `common_start` 位带第 3 行执行 `at s1e1r, x0; dsb sy; mrs x7, PAR_EL1`（不加 `isb`），真机读出 `PAR_EL1 = 0x00000800`（即 `PAR_EL1` 的硬件复位默认值，Bit 11 RES1=1）。
+- 这证明：**因为 v3 删除了 `MSR_SCTLR_EL1_X0` 后的 `isb`，在整个 `common_start` 窗口内，`SCTLR_EL1.M=1` 根本没有在 CPU 流水线中生效（CPU 仍然处于 `M=0` 物理直通模式）！**
+- 实验 2：一旦在第 2 行之后插入 `isb`，或者在第 1 行执行 `mrs x7, ID_AA64MMFR0_EL1`（因 Gunyah Hypervisor 设置了 `HCR_EL2.TID3=1`，读取 `ID_AA64MMFR0_EL1` 会陷入 `EL2`，而 Gunyah 返回 `EL1` 执行的 `eret` 本身就是上下文同步事件 CSE），`SCTLR_EL1.M=1` 被瞬间激活，CPU 立即死锁（第 1 行执行 `mrs ID_AA64MMFR0_EL1` 时屏幕画出 **0 行条形码**，因为 `eret` 发生在画第 1 行之前！）。
+- 同时核查 [`shim/shim.c`](file:///Users/damon/unixnu-pagani/shim/shim.c#L378-L400) 发现：当附带 XNU payload 时，BootShim 直接在 `M=0` 下调用 `loader_boot(dtb)`，`shim/mmu.c` 中的 16KB MMU 代码只曾在红米 Note 10 Pro（`sweet`，Cortex-A76）上运行过，**从未在一加 13s（`pagani`，骁龙 8 Elite Oryon）上运行过**！
+
+#### 4. `M=0` 下直读 `ID_AA64MMFR0_EL1`：揭晓终极硬件真相
+- 为了防止 Gunyah `eret` 激活损坏的 MMU，我们将 `0xfffffe000748d618` 处的 `msr SCTLR_EL1, x0` 临时替换为 `nop`（保持 `SCTLR_EL1.M=0`），再次在真机上读取 4 行关键寄存器（对应照片 `media_1793868616299_e91f92a7.jpg`），精确解码出 32 位二进制值：
+  - **Row 1 (`ID_AA64MMFR0_EL1[31:0]`)** = `00000000000000000001000000100100` = **`0x00001024`**
+    - `PARange` (Bits `[3:0]`) = `0x4`（44-bit 物理地址宽度，16TB）
+    - `ASIDBits` (Bits `[7:4]`) = `0x2`（16-bit ASID）
+    - `BigEnd` (Bits `[11:8]`) = `0x0`
+    - `SNSMem` (Bits `[15:12]`) = `0x1`
+    - `BigEndEL0` (Bits `[19:16]`) = `0x0`
+    - **`TGran16` (Bits `[23:20]`) = `0x0` (`0b0000` —— 硬件不支持 16KB 页表粒度！)**
+    - `TGran64` (Bits `[27:24]`) = `0x0` (`0b0000` —— 支持 64KB 页表粒度）
+    - **`TGran4` (Bits `[31:28]`) = `0x0` (`0b0000` —— 支持 4KB 页表粒度！）**
+  - **Row 2 (`SCTLR_EL1[31:0]`)** = `00110000110100000000100110001000` = **`0x30d00988`**（`M=0, C=0, I=0, SPAN=1`）
+  - **Row 3 (`TTBR0_L1[0][31:0]`)** = `10110001000110000100000000000011` = **`0xb1184003`**
+  - **Row 4 (`TTBR0_L2[88][31:0]`)** = `10110000000000000000011100000001` = **`0xb0000701`**
+
+> **终极结论**：高通骁龙 8 Elite（SM8750）自研 Oryon CPU 核心的 `ID_AA64MMFR0_EL1` 为 `0x00001024`——**硬件仅支持 4KB（及 64KB）页表粒度，完全不支持 16KB 页表粒度（`TGran16 == 0`）！**
+> 苹果 XNU 默认配置 `__ARM_16K_PG__ = 1`，将 `TCR_EL1` 的 `TG0` 设为 `0b10`（16KB）、`TG1` 设为 `0b01`（16KB）。当 `SCTLR_EL1.M=1` 遇到任何上下文同步事件（`isb` 或 Gunyah `eret`）真正激活硬件 MMU 时，Oryon MMU 因不支持 16KB 粒度，所有指令取指立即触发同步页表转换故障（Translation Fault），而异常向量表 `VBAR_EL1` 本身也需要经过同一个失效的 MMU 转换，导致 CPU 陷入同步异常死循环而静默冻结！
+
+#### 5. 4KB 页粒度实验与发现 `start_first_cpu` L2 页表越界覆盖 `.data`
+- 在随后尝试将早期 `bootstrap_pagetables` 改为 4KB 页粒度时（照片 `media_1793869133541_92f3b6d2.jpg`），屏幕仅点亮了第 1 个黄色方块（CP1），连第 2 个青色方块（CP2，`common_start` 之前）都未点亮。
+- 原因查明：
+  1. 在 16KB 编译下，`bootstrap_pagetables` 位于 `0xfffffe000717c000`（`x25 = 0xb117c000`），代码在 `0xfffffe000748d1b4` 处先清零了 `8192 * 8 = 64KB`（`x25 .. x25 + 0x10000`）。
+  2. 但在刚才的 4KB 早期页表测试脚本中，我们在 `0x48941c` 处修改 `dc civac` 循环时，误将 `movz x11, #0x0400, lsl #16` 写成了读取未转化物理地址 `0xb0000000`，而 `dc civac` 的计数寄存器 `x11` 装载值编码有误，导致循环在 CP2 之前未退出或触发异常！
+- **架构级解决方案**：
+  1. **短期（打通 Milestone 4 & Milestone 5 `arm_init`）**：保持 `dc civac` 只清理 `x25` 开始的 64KB 页表区域（不改动 `0x48941c`），仅将 `TCR_EL1`（`0x00000004b5193519`：4KB 粒度 `TG0=0b00, TG1=0b10, T0SZ=25, T1SZ=25`）和 `x25` 内的 4KB 页表描述符配置好，即可在 2 秒内验证 4KB MMU 开启、`isb` 存活、KVA 跳转与 `arm_init` 进入！
+  2. **长期（完整内核 VM 与用户态支持）**：在 [`pexpert/pexpert/arm64/SWEET.h`](file:///Users/damon/unixnu-pagani/xnu/patches/0004-sweet-machine-config.patch#L251) 中，针对 `PAGANI`（Oryon）关闭 `#define __ARM_16K_PG__ 1`（参考 XNU 树莓派 `BCM2837.h` 的 4KB 页表配置），使 XNU 的 `arm_vm_init` 和 `pmap` 原生运行在 4KB 页表粒度下！
+
+#### 6. 历史性突破：4KB 页粒度下 `isb` 与 MMU 100% 存活，异常向量首次捕获 `ESR_EL1` / `FAR_EL1`！
+- 在保持原版 `dc civac` 循环并启用 4KB 页粒度（`TCR_EL1 = 0x00000004b5193519`）后（对应照片 `media_1793869496919_8ef481e3.jpg` 与 `media_1793869724740_9eff871e.jpg`）：
+  1. **Probe Row 1 (`TCR_EL1[31:0]`)** = **`0xb5193519`**（4KB 粒度生效）
+  2. **Probe Row 2 (`SCTLR_EL1[31:0]`)** = **`0x30d0198d`**（在 `isb` 指令**之后**绘制！最低 4 位 `0xd` = `M=1, C=1, I=1`，证明 **4KB 页粒度下 MMU + D-Cache + I-Cache 开启后执行 `isb` 上下文同步 100% 存活**！）
+  3. **Probe Row 3 (`PAR_EL1[31:0]`)** = **`0x00000809`**（`F=1, FST=0x04` Level 0 Translation Fault）
+  4. **异常向量表首次成功触发并渲染**：
+     - **`ESR_EL1[31:0]`** = **`0x96000004`**（`EC = 0x25` Data Abort from current EL, `DFSC = 0x04` Level 0 Translation Fault）
+     - **`FAR_EL1[31:0]`** = **`0x0748e880`**（故障地址 `0xfffffe000748e880`，即 `_sweet_kva_probe`）
+- **为什么 `T1SZ=25` 下会报 Level 0 Translation Fault (`0x04`)？**
+  - 在 `T1SZ=25`（39-bit VA）下，高半区合法地址要求 Bits `[63:39]` 必须全为 `1`（即 `>= 0xffffff80_00000000`）。
+  - 但 XNU 的内核虚拟地址是 `0xfffffe00_0748e880`，其 Bit 41 和 Bit 40 为 `0`！因此硬件在进入 L1 之前直接判定高位不合法，抛出 Level 0 Translation Fault (`0x04`)！
+- **立即修复（`T1SZ=16` 4 级页表 `L0 -> L1 -> L2`）**：
+  - 将 `TCR_EL1` 更新为 `0x00000004b5103519`（`T0SZ=25` 3 级页表，`T1SZ=16` 48-bit 4 级页表），设置 `TTBR1` 的 `L0[508]` (`0x1fc`, 偏移 `4064`) -> `L1[0]` (`x25 + 0x6000`) -> `L2[48..111]` (`x25 + 0x5000`)，已刷入真机待读屏验证！
+
+#### 7. Milestone 4 & Milestone 5 全面告捷：成功进入 `arm_init` 并连续跑通 8 大阶段直抵 `arm_vm_init`！(2026-11-05 17:13)
+- 刷入 `T1SZ=16` 4 级页表修复镜像后（对应照片 `media_1793869969665_c17e464d.jpg`），真机屏幕迎来了里程碑式的全面胜利：
+  1. **下半区 4 行启动探针位带全绿通过**：
+     - **Probe Row 1 (`TCR_EL1[31:0]`)** = **`0xb5103519`**（`T1SZ=16` 4 级页表、`T0SZ=25` 3 级页表、4KB 页粒度）
+     - **Probe Row 2 (`SCTLR_EL1[31:0]`)** = **`0x30d0198d`**（`M=1, C=1, I=1` 在 `isb` 后稳定运行）
+     - **Probe Row 3 (`PAR_EL1[31:0]`)** = **`0xb148eb00`**（`PAR_EL1.F == 0` 转换成功！`0xfffffe000748e880` 被硬件 MMU 完美翻译到物理地址 `0xb148e880`！）
+     - **Probe Row 4 (`[0xfffffe000748e880]`)** = **`0xd503201f`**（成功通过高地址 KVA 读出 `_sweet_kva_probe` 首条指令 `nop`！）
+  2. **KVA 蹦床与 C 语言入口色块全亮**：
+     - **CP6A（100×100 巨型青色方块）**：点亮！
+     - **CP6（60×60 橙色方块，`arm_init` C 函数入口）**：点亮！
+     - **CP6B（60×60 亮品红方块，KVA 栈读写验证）**：点亮！
+  3. **屏幕顶部连续打印 8 行 XNU C 语言早期控制台日志**：
+     - `SWEET EARLY 1: arm_init entered (MMU on)`
+     - `SWEET EARLY 2: PE_init_platform done`
+     - `SWEET EARLY 3: ml_parse_cpu_topology done`
+     - `SWEET EARLY 4: cpu_bootstrap done`
+     - `SWEET EARLY 5: kernel_startup_bootstrap done`
+     - `SWEET EARLY 6: cpu_init done`
+     - `SWEET EARLY 7: entering arm_vm_init`
+     - `SWEET EARLY 8: leaving bootstrap TTBR0`
+  4. **捕获 `SWEET EARLY 8` 之后的精确异常（`arm_vm_init` 切换 `cpu_ttep` 之后）**：
+     - **`ESR_EL1`** = **`0x96000044`**（`EC = 0x25` Data Abort, `WnR = 1` 写操作, `DFSC = 0x04` Level 0 Translation Fault）
+     - **`FAR_EL1[31:0]`** = **`0x034196c0`**（对应高地址 `0xfffffe00034196c0`，即 `sweet_early_relocate` 切换后的内核显存虚拟地址 `SWEET_EARLY_FB_VA`！）
+     - **根因**：`arm_vm_init` 在调用 `sweet_early_relocate` 前执行了 `set_mmu_ttb_alternate(cpu_ttep)`，而当前内核编译时在 `SWEET.h` 中定义了 `#define __ARM_16K_PG__ 1`，因此 `arm_vm_init` 构建的 `cpu_ttep` 是 16KB 粒度的页表，与 Oryon 硬件所需的 4KB 粒度页表不兼容。
+     - **下一步（Milestone 5 收官）**：将 XNU 内核配置从 16KB 页表（`__ARM_16K_PG__`）切换为 ARM64 原生 4KB 页表（参考树莓派 `BCM2837.h`），使 `arm_vm_init` 和 `pmap` 原生生成 4KB 页表！

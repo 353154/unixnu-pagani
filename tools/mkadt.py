@@ -9,9 +9,11 @@ import hashlib, os, struct, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import adt  # noqa: E402
 
-# Kernel-managed RAM: above every Qualcomm XPU carve-out (see NOTES.md)
+# Kernel-managed RAM: on pagani (SM8750), 0xb8000000+ has xbl_ramdump,
+# gunyah_hyp_region1@bd930000, tz_merged_region@d8000000, etc.
+# Keep MEM_SIZE to 128MB (0xb0000000..0xb8000000) to avoid all XPU carve-outs!
 PHYS_BASE = 0xb0000000
-MEM_SIZE = 0x4d000000
+MEM_SIZE = 0x08000000
 # Panic log buffer, carved from the TOP of the dram range and exposed to XNU as
 # /pram + /chosen/embedded-panic-log-size. Without it, pe_init.c's
 # check_for_panic_log() leaves gPanicBase == 0, debug_log_init() bails out twice

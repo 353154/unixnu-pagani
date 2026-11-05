@@ -32,6 +32,18 @@ index 8460893..9a748ea 100644
  
  endif
  
+@@ -332,9 +336,11 @@ ARM64_LINK_ADDR    =0xfffffff007004000
+ 
+ # Use ARM_LARGE_MEMORY config for all MacOSX targets.
+ ifneq ($(filter $(PLATFORM),MacOSX),)
++ifeq ($(filter $(CURRENT_MACHINE_CONFIG),SWEET PAGANI),)
+ LARGE_MEMORY_DEFINE=-DARM_LARGE_MEMORY=1
+ ARM64_PLKSEG_ADDR  =0xfffffe0004004000
+ ARM64_LINK_ADDR    =0xfffffe0007004000
++endif
+ endif
+ 
+ 
 diff --git a/osfmk/arm64/proc_reg.h b/osfmk/arm64/proc_reg.h
 index 133b07f..e01c124 100644
 --- a/osfmk/arm64/proc_reg.h
@@ -248,7 +260,7 @@ index 0000000..a044ad0
 +#define __ARM_ENABLE_SWAP__       1
 +#define __ARM_V8_CRYPTO_EXTENSIONS__ 1
 +#define __ARM_PAN_AVAILABLE__     1
-+#define __ARM_16K_PG__            1
++/* Oryon SM8750 (ID_AA64MMFR0_EL1 = 0x00001024) has TGran16=0, TGran4=0: use 4K pages */
 +
 +#define HAS_GIC_V3                1
 +
