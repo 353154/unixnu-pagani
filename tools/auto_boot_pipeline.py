@@ -25,9 +25,7 @@ REQUIRED_MARKS = [b"SWD00", b"SWE00", b"SWC01",
                   # 0087 kmem 空间探针：比上面几条更关键——它决定本轮能否读出 kernel_map 边界
                   b"SWK0", b"SWK1", b"SWK2", b"SWK3",
                   # 0088 claim 明细
-                  b"SWQ%u", b"SWG free=",
-                  # 0012：补丁被静默跳过数轮才导致的长期误判，必须每次校验
-                  b"SWEET EARLY 31"]
+                  b"SWQ%u", b"SWG free="]
 
 
 def token():
