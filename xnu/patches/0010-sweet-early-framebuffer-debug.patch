@@ -99,7 +99,7 @@ index d89b0f1..d0c710d 100644
  
  	flush_mmu_tlb();
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index ccbb188..ed8f758 100644
+index ccbb188..8a9f413 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
 @@ -212,6 +212,62 @@ LEXT(ResetHandlerData)
@@ -361,20 +361,24 @@ index ccbb188..ed8f758 100644
  
  #if !VMAPPLE && !defined(SWEET)
  	MOV64   x1, SCTLR_EL1_DEFAULT
-@@ -794,6 +996,57 @@ common_start:
+@@ -794,6 +996,69 @@ common_start:
  	add		x0, x20, x22
  	sub		x0, x0, x23
  
 +#if defined(SWEET)
-+	mov		x19, x0
++	/*
++	 * Preserve arm_init target (lr) and boot_args KVA (x0) across all debug calls!
++	 * Use callee-saved registers x27 and x28.
++	 */
++	mov		x27, lr
++	mov		x28, x0
++
 +	SWEET_CHECKPOINT 340, 0xff0088ff
 +	SWEET_MICRO 260, 0xff880000		// CP5 trailing dsb sy retired
-+	mov		x0, x19
 +	/*
 +	 * v6 verdict: isb AND eret (both context synchronization events) freeze
 +	 * the core with M=1; every non-CSE instruction survives. Run this window
-+	 * CSE-free: no isb, no eret - plain fall-through. Empirically safe (v3
-+	 * executed 40+ instructions post-MMU-on without any sync).
++	 * CSE-free: no isb, no eret - plain fall-through.
 +	 */
 +	SWEET_MICRO 280, 0xff008800		// CSE-free fall-through
 +	SWEET_MICRO 300, 0xff000088
@@ -390,10 +394,8 @@ index ccbb188..ed8f758 100644
 +	MOV64	x1, (0xfc800000 + 960 * 4864 + 100 * 4)
 +	bl		Lsweet_exc_bits
 +	/*
-+	 * v11: be our own page-table walker. Read the KVA L1/L2 descriptors
-+	 * the hardware walk would see, via safe V=P physical addresses, and
-+	 * paint them as bit bands (rows 1020/1080). No TTBR1 translation, no
-+	 * exception, no CSE anywhere.
++	 * Read the KVA L1 and L2 descriptors via safe V=P physical addresses,
++	 * and paint them as bit bands (rows 1020/1080).
 +	 */
 +	mrs		x7, TTBR1_EL1
 +	and		x7, x7, #(TTBR_BADDR_MASK)		// KVA L1 base PA
@@ -402,40 +404,34 @@ index ccbb188..ed8f758 100644
 +	and		x8, x8, #0x7ff
 +	add		x9, x7, x8, lsl #3
 +	ldr		x10, [x9]						// KVA L1 descriptor
++	mov		x15, x10						// PRESERVE x10 in x15 across bl!
 +	mov		x4, #4864
 +	mov		x7, x10
 +	MOV64	x1, (0xfc800000 + 1020 * 4864 + 100 * 4)
 +	bl		Lsweet_exc_bits
-+	and		x7, x10, #(ARM_TTE_TABLE_MASK)	// L2 base from descriptor
++	and		x7, x15, #(ARM_TTE_TABLE_MASK)	// L2 base from preserved descriptor
++	MOV64	x0, 0xfffffe000748b488			// re-load probed KVA
 +	lsr		x8, x0, #25						// L2 index = VA[35:25]
 +	and		x8, x8, #0x7ff
 +	add		x9, x7, x8, lsl #3
 +	ldr		x10, [x9]						// KVA L2 descriptor
++	mov		x4, #4864
 +	mov		x7, x10
 +	MOV64	x1, (0xfc800000 + 1080 * 4864 + 100 * 4)
 +	bl		Lsweet_exc_bits
++	/* KVA data-plane probe: read kernel entry page via TTBR1 (safe read test) */
++	MOV64	x2, 0xfffffe000748b488
++	ldr		x3, [x2]
++	SWEET_BIG 660, 100, 0xff00ff88		// KVA data read survived (big spring block)
++	/* Restore arm_init target (lr) and boot_args KVA (x0) */
++	mov		lr, x27
++	mov		x0, x28
 +#endif
 +
  #if KASAN
  	mov	x20, x0
  	mov	x21, lr
-@@ -858,15 +1111,121 @@ arm_init_tramp:
- 
- 
- 	mov		x19, lr
-+	/* KVA data-plane probe: read the kernel entry page via TTBR1. */
-+	MOV64	x0, 0xfffffe000748b488
-+	ldr		x1, [x0]
-+	ldr		x1, [x0, #8]
-+	SWEET_BIG 660, 100, 0xff00ff88		// KVA data read survived (big spring block)
- 	// Convert CPU data PA to VA and set as first argument
- 	mov		x0, x21
- 	bl		EXT(phystokv)
- 
- 	mov		lr, x19
-+	SWEET_MICRO 220, 0xffcc33dd		// first KVA fetch (phystokv) survived (brightened)
-+	SWEET_BIG 730, 100, 0xffcc33dd		// phystokv returned (big bright magenta)
- 
+@@ -867,6 +1132,105 @@ arm_init_tramp:
  	/* Return to arm_init() */
  	ret
  
