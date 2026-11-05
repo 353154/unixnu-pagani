@@ -1,0 +1,47 @@
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -2795,6 +2795,25 @@
+ 	unsigned int newMapSize = 0;
+ 
+ 	kprintf("SWD00 isc op=%d kmap=%d\n", op, kernel_map != VM_MAP_NULL);
++	if (op == kPEAcquireScreen) {
++		/*
++		 * sweet: framebuffer 已由 0003 注册为 serial 设备，kprintf 走
++		 * PE_kputc -> uart_putc -> sweet_fbcon，不依赖 video console。
++		 * 而 video console 接管时会把 gc_enabled 置 FALSE（图形模式），
++		 * 并用 vinfo.v_baseaddr 当指针绘制；该值来自 boot_args，
++		 * 与本平台内核已建立的 FB 映射不一致，绘制即异常。故跳过接管。
++		 * gc_graphics_boot 置 TRUE，使 vcattach() 的
++		 * “gc_graphics_boot == FALSE” 分支不再重放整段 msgbuf。
++		 */
++		kprintf("SWV1 video console skipped serial=%d gboot=%d vbase=%lx depth=%d\n",
++		    console_is_serial(), gc_graphics_boot,
++		    (unsigned long)vinfo.v_baseaddr, vinfo.v_depth);
++		gc_graphics_boot     = TRUE;
++		gc_desire_text       = FALSE;
++		gc_acquired          = TRUE;
++		disableConsoleOutput = FALSE;
++		return;
++	}
+ 	vm_offset_t newVideoVirt = 0;
+ 	boolean_t graphics_now;
+ 	uint32_t delay;
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -729,6 +729,7 @@
+ 	 * This will start displaying progress to the user, start as early as possible
+ 	 */
+ 	initialize_screen(NULL, kPEAcquireScreen);
++	kprintf("SWV2 initialize_screen returned\n");
+ 
+ 	/*
+ 	 *	Initialize the shared region module.
+@@ -809,6 +810,7 @@
+ 	 *	Start the user bootstrap.
+ 	 */
+ #ifdef  MACH_BSD
++	kprintf("SWV3 entering bsd_init\n");
+ 	bsd_init();
+ #endif
+ 

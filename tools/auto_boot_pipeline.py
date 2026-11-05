@@ -25,7 +25,9 @@ REQUIRED_MARKS = [b"SWD00", b"SWE00", b"SWC01",
                   # 0087 kmem 空间探针：比上面几条更关键——它决定本轮能否读出 kernel_map 边界
                   b"SWK0", b"SWK1", b"SWK2", b"SWK3",
                   # 0088 claim 明细
-                  b"SWQ%u", b"SWG free="]
+                  b"SWQ%u", b"SWG free=",
+                  # 0090 console 接管旁路 + 活体探针
+                  b"SWV1", b"SWV2", b"SWV3"]
 
 
 def token():
