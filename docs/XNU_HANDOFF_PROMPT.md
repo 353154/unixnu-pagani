@@ -17,12 +17,12 @@
 | 项 | 值 |
 | :--- | :--- |
 | 当前阶段 | **M6 已完成**（console 接管通过），进入 M7：`kernel_bootstrap` 跑到 VM 子系统后卡在 kmem 空间分配 |
-| 最新内核提交 | `412a3cf`（`0088` claim 明细探针）；`d3c06d7` 是 `0087` 那版 |
-| 最新构建 | Run `42045809346`（d3c06d7）已实测；`412a3cf` 构建中 |
+| 最新内核提交 | `36ce59d`（`0089` zone map VA 128GB→24GB，**首次行为改动**）；`412a3cf` 是 `0088` 探针版 |
+| 最新构建 | `42049408576`（412a3cf）已实测；`36ce59d` 构建中 |
 | 屏幕最后一行 | `maximum number of VM swap files: 100`（在 panic 之后仍会继续打印，别用它当死点） |
-| 死点 | `kmem_range_init: vm_map_locate_space failing for claim vm_ptr_range @vm_kern.c:3645` —— **kernel_map 虚拟空间**分配失败，与物理内存无关 |
-| 已确认机制 | `largest_free_size -= total_claims` **无符号下溢**：`claims ≈ 140.7GB`（`n=13`）> kernel_map 可用空间 |
-| 下一步动作 | 读 `SWQ0`~`SWQ12` 十三行 + `SWG` 一行（十进制 MB），找出哪一项 claim 占了上百 GB |
+| 死点 | `kmem_range_init: vm_map_locate_space failing for claim <name> @vm_kern.c:3645/3665` —— **kernel_map 虚拟空间**分配失败，与物理内存无关 |
+| 已确认根因 | `zones` 一项索取 **128GB** VA（`ZONE_MAP_VA_SIZE` 走了 MacOSX 分支），而 `kernel_map` 最大空洞仅 **48,365MB** → `largest_free_size -= total_claims` 无符号下溢 |
+| 下一步动作 | 验证 `SWG claims` 是否从 134,178MB 降到约 27,000MB，以及是否越过 `kmem_range_init` 继续往下跑 |
 
 ---
 
@@ -52,6 +52,7 @@
 | "屏幕最后一行 = 死点" | §13 方法论 | **本环境 `panic()` 不终止系统**，打印完继续往下跑。必须找"本该出现却没出现的下一行" |
 | "`SWT In 6.1 0x...` 是死循环" | 本轮读屏 | 是 `0083` 对每个 `__startup_func` 的追踪（`SWT in <subsys>.<rank> <func>` / `SWT ok <func>`），底部重复几十行是正常的逐子系统初始化 |
 | "`kernel_map->max_offset` 被 `0004` 压到 `0xFC0000000`，空间为 0" | §14.4 | **已推翻**。`SWK0` 实测 `max=ffffffff...`，是 64 位顶端量级。真因是 `claims ≈ 140.7GB` 撑爆可用空间后**减法下溢**（§14.6）。误判原因：只看编译期宏，没等运行时读数就写进了主叙事 |
+| "claims 是某项 `kc_calculate_sz` 按物理内存算歪了" | §14.6 | **已推翻**。`zones` 的 128GB 是**编译期常量** `ZONE_MAP_VA_SIZE`（MacOSX 分支），根本没有运行时计算参与。误判原因：看到「13 项平均 10.8GB」就假设是计算错误，没先查注册点的尺寸来源 |
 
 另附事实约束（不是结论，是环境限制）：
 - 本机 `xnu-src` 是**残缺快照**（缺 `config/MASTER.arm64.sweet` 等），只能对 `osfmk/`、`pexpert/` 做 `git apply --check` dry-run，**无法完整本地试跑补丁序列**。
@@ -93,20 +94,20 @@ largest_free_size -= total_claims;
 ptr_range_size = largest_free_size / ((kmem_ptr_ranges + 1) * 2);
 ```
 
-**已确认（`0087` 实测，`d3c06d7` / Run `42045809346`）**：不是 `max_offset` 被压小，而是**减法下溢**。
+**已确认根因（`0088` 实测，`412a3cf` / Run `42049408576`）**：`zones` 一项索取 128GB。
 
 ```
-SWK0 kmap min=fffffffeb8000000 max=ffffffffbfffffff lfree=beb5fc000
-SWK1 claims=20c2243000 lfree=fffffffeb293b900 n=13     ← lfree 变负，下溢发生
-SWK2 ptr=3ffffffaca4ef000 data=bffffff05c193000 spray=2d37000 pr=1
-SWK3 claim=kmem_ptr_range size=7ff4cad40000 start=fffffff0429bd000
+SWQ12 zones 131072MB        ← 唯一异常项
+SWG   free=48365MB claims=134178MB n=13
 ```
 
-`claims = 0x20c2243000 ≈ 140.7GB`，`n=13`，平均每项 10.8GB。Apple arm64 的 `kernel_map` 约 68GB，**140GB 在任何 Apple 设备上都放不下**——所以更可能是某单项 claim 的尺寸在本平台被算歪，而不是「我们的空间偏小」。
+`zones` 的尺寸来自 `osfmk/kern/zalloc.c:10148` 的 `KMEM_RANGE_REGISTER_STATIC(zones, &zone_map_range, ZONE_MAP_VA_SIZE)`，而 `ZONE_MAP_VA_SIZE` 按平台分支：MacOSX = **128GB**，其它（iOS 等）= **24GB**。本构建走了 MacOSX 分支 → 128GB 塞不进 47GB 的 `kernel_map` → 减法下溢 → 所有 claim 的 size 变成 2⁶² 量级 → `locate` 必然失败。
 
-旁证：`spray=2d37000`（≈45MB）被 `sane_size/2` 夹住（物理 22703 free pages ≈ 88MB）。若没下溢，`spray` 应等于 `ptr` 的巨值，它没有——说明确实走到了下溢之后。
+其余 12 项合计仅 3,106MB，全部正常。`zone_meta 512MB` 是 `atop(VA_SIZE)×16B` 的衍生值，会随 VA 一起下降。
 
-**验证手段**：`0088` 的 `SWQ0`~`SWQ12` 十三行 + `SWG`，见 §7。
+**顺带解释一个历史现象**：panic 的 claim 名在 `vm_ptr_range` / `kmem_data_range` 之间变化，是 `kmem_shuffle_claims()` 随机打乱顺序所致，**不是硬件随机性**。
+
+**验证手段**：`0089` 修复后的 `SWG` 行，见 §7。
 
 ---
 
@@ -124,7 +125,7 @@ boot-args 随机性（`startup_debug=0x1` 反而更早停，已回退基线）·
   1. 用户整屏照片 → 多模态直接 OCR（能读 `SWDxx`/`SWExx` 与 `kprintf` 文本行）；
   2. 裁剪放大局部（小号 `iso_font` 8×16）；
   3. Pixel-level 读色带（自己写 PNG 解码，逐像素采样某格是红/绿/亮/灭）——抗模糊、抗反光，**比 OCR 可靠**。
-- **当前检查点体系**：`0083` = 汇编层 `SWT`；`0084` = GIC `SWC01..SWC33`（`GICD_CTLR.RWP` 自旋已改 20 万次有界）；`0085` = console 接管 `SWD00..SWD07` / `SWE00..SWE03`；`0086` = 64×128 红色大数字阶段读数（远距离也能拍清）；`0087` = kernel_map 边界 `SWK0..SWK3`（已完成使命）；`0088` = claim 明细 `SWQ0..SWQ12` + `SWG`（当前在役）。
+- **当前检查点体系**：`0083` = 汇编层 `SWT`；`0084` = GIC `SWC01..SWC33`（`GICD_CTLR.RWP` 自旋已改 20 万次有界）；`0085` = console 接管 `SWD00..SWD07` / `SWE00..SWE03`；`0086` = 64×128 红色大数字阶段读数（远距离也能拍清）；`0087` = kernel_map 边界 `SWK0..SWK3`（已完成使命）；`0088` = claim 明细 `SWQ0..SWQ12` + `SWG`（已完成使命，保留在核心里用于验证 `0089`）；`0089` = zone map VA 修复（当前在役）。
 - **读屏铁律**：**大数十六进制读不准**。凡是结论依赖具体数值的探针，一律打印十进制 MB/GB（`0088` 起执行）。色带与 MB 数比长十六进制可靠得多。
 
 ---
@@ -155,26 +156,30 @@ python3 ~/unixnu-pagani/tools/auto_boot_pipeline.py --sha <commit>
 
 ## 7. 下一步该做什么（精确到文件）
 
-### 7.1 当前这一轮：读 `SWQ0`~`SWQ12` + `SWG`
+### 7.1 当前这一轮：验证 `0089` 是否解掉下溢
 
-`0087` 已完成使命（结果见 §3.2）。`0088-sweet-kmem-claim-breakdown.patch`（提交 `412a3cf`）在 `kmem_add_extra_claims()` 的累加循环里逐项打印，并把大数换成**十进制 MB**：
+`0089-sweet-zone-map-va-24g.patch`（提交 `36ce59d`）把 MacOSX 分支的 `ZONE_MAP_VA_SIZE` 从 128GB 降到 iOS 的 24GB。`0088` 的探针保留在核心里，用来验证修复确实生效。
 
-| 标记 | 位置 | 读数 |
-| :--- | :--- | :--- |
-| `SWQ0`..`SWQ12` | claim 累加循环内，每项一行 | `序号 名字 大小MB` |
-| `SWG` | 减法之前 | `free=<MB> claims=<MB> n=13` |
+判读只需要两行：
 
-用 MB 而非十六进制，是因为 §14.6 已经证明：**大数十六进制在照片里读不准**，而结论完全依赖这种数。
+| 看什么 | 修好之后应该是 |
+| :--- | :--- |
+| `SWG free=<MB> claims=<MB> n=13` | `claims` 从 134,178MB 降到 **≈27,000MB**，且 `free > claims` |
+| `SWQ12 zones <MB>` | 从 131,072MB 降到 **24,576MB**；`SWQ0 zone_meta` 从 512MB 降到 ≈96MB |
 
-### 7.2 按读数分支
+**然后看是否还出现 `PANIC: kmem_range_init ...`**。若不再出现，说明 `vm_ptr_range` / `kmem_data_range` / `kmem_sprayqtn_range` 三段都分配成功，内核会继续往 `kernel_bootstrap` 后段跑。
 
-- **某一项 `SWQn` 独占上百 GB** → 定位到具体子系统的 `kc_calculate_sz`。13 项里按物理内存/页数推算的（`zalloc`、`vmap`/`kalloc`、`kmem_meta_size` 一类）最可疑；查它的计算是否用了错误的 `sane_size` 或页大小假设（我们是 4KB，Apple 默认 16KB，凡按页数乘的都会差 4 倍，但 4 倍不足以解释 140GB，所以更可能是**另一个数值被当成内存大小**）。
-- **13 项都很小，但 `SWG claims` 仍上百 GB** → 累加本身出错（类型截断/重复注册），查 `kmem_claim_count` 是否被重复自增（`KMEM_RANGE_COUNT` 的三个 range claim 也走同一个数组）。
-- **`SWG free` 本身就只有几 GB** → 那 `kernel_map` 范围确实过小，回到「扩大 `VM_MIN_KERNEL_ADDRESS` 之下限」这条路线，但**这条优先级低**：先证明 claims 正常，再谈扩容。
+### 7.2 可能的结果与分支
+
+- **`claims≈27GB` 且不再 panic** → 过了。继续盯屏幕后续阶段，准备 M8（PSCI）。
+- **`claims≈27GB` 但仍 panic，claim 名变成别的** → 这次是真正的碎片问题（`free` 是最大空洞不是总空间）。修法：适度放大 `VM_MIN_KERNEL_ADDRESS` 之下的可用区间，或继续下调 `ZONE_MAP_VA_SIZE` 到 16GB/8GB。
+- **`claims` 没变，仍 134,178MB** → `0089` 没生效，先查 `#undef/#define` 的位置是否在该 TU 里确实可见（`ZONE_MAP_VA_SIZE` 只在 `zalloc.c` 内部使用）。
 
 ### 7.3 通过之后
 
 `kernel_bootstrap` 剩余阶段跑完 → `bsd_init` → 8 核 PSCI（M8）→ UFS/ramdisk（M9）→ launchd（M10）。
+
+**同时值得评估**：本构建为什么走 `XNU_PLATFORM_MacOSX` 分支。`0089` 只打了补丁，没改平台判定；若后续再遇到「Mac 有、iOS 没有」的常量差异（这类差异在 zalloc / IOKit / 驱动加载路径上还有若干处），应整体切到 iOS 平台配置，而不是逐个打补丁。**但那是一次大改，必须单独一轮、单独归因。**
 
 ### 7.4 顺手该修的（不阻塞主线）
 

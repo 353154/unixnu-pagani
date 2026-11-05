@@ -554,16 +554,17 @@ v4（`23e7859`）在两处补标记（x=180 深青 = isb 存活，x=220 深品�
 > **手机**：fastboot 序列号 `3B1F67EA9BBUHK76`，仅 `fastboot boot`（严禁 flash/erase），挂死=长按电源重启
 > **屏幕分辨率** 1216×2640，stride 4864；控制台/检测带布局见 §7 与 `~/Desktop/SCREEN_READ_PROMPT.md`
 
-### 8.1 当前进度快照（2026-11-05 22:52 刷新，**本节为唯一权威状态，旧版本内容已作废**）
+### 8.1 当前进度快照（2026-11-05 23:10 刷新，**本节为唯一权威状态，旧版本内容已作废**）
 - **已攻克**（按序）：OSLAR_EL1 UD → WXN/A → C=0→C=1 → CSE 致命性 → TG1/TG0 粒度真相（`TGran16==0`）→ 原生 4KB 全量内核 → `T1SZ=16` 四级 KVA 页表 → TTBR0 销毁/TTBR1 接管 → `arm_vm_init` + `pmap_bootstrap` → **console 接管（`initialize_screen` 通过）** → **XNU 真实 `kprintf` 上屏** → **`machine_startup` → `kernel_bootstrap` → VM 子系统五级初始化（页表/zone/vm_map/kmem/swap）**
-- **当前死点（真机实测，见 §14.2）**：`kmem_range_init: vm_map_locate_space failing for claim vm_ptr_range @vm_kern.c:3645`。这是 **kernel_map 虚拟空间**分配问题，与物理内存布局无关
-- **已确认机制（§14.6，`0087` 实测）**：`largest_free_size -= total_claims` **无符号下溢**。`claims = 0x20c2243000 ≈ 140.7GB`，`n=13`；下溢后 `ptr_range_size ≈ 4.6EB`、`kmem_ptr_range` 单段要 `≈140TB` VA，`locate` 必然失败。原假设"`max_offset` 被压到 `0xFC0000000`"**已被推翻**（实测 `max=ffffffff...`），已列入交接黑名单
-- **正在验证**：`0088` 的 `SWQ0`~`SWQ12` + `SWG`（commit `412a3cf`），按十进制 MB 逐项打印 13 个 claim，定位谁占了上百 GB
+- **当前死点（真机实测，见 §14.2）**：`kmem_range_init: vm_map_locate_space failing for claim <name> @vm_kern.c:3645/3665`。这是 **kernel_map 虚拟空间**分配问题，与物理内存布局无关
+- **已确认根因（§14.7，`0088` 实测）**：`zones` claim 一项索取 **128GB** VA，而 `kernel_map` 最大空洞仅 **48,365MB** → `largest_free_size -= total_claims` 无符号下溢 → 所有 claim 的 size 变成 2⁶² 量级 → `locate` 必然失败。128GB 来自 `zalloc.c:164` 的 `ZONE_MAP_VA_SIZE`（**MacOSX 分支**）；同一份代码的 iOS 分支是 24GB
+- **正在验证**：`0089`（commit `36ce59d`）把该宏降到 24GB。预期 `claims` 134,178MB → ≈27,000MB，`free > claims`，不再 panic
 - **两条方法论修正（务必遵守）**：① 本环境 `panic()` **不终止**系统，屏幕最后一行 ≠ 死点；② `SWT` 是 `__startup_func` 追踪，不是死循环标记
-- **第三条方法论修正（本轮新增）**：**大数十六进制不要靠照片读**。探针一律打印十进制 MB/GB，否则读数误差会直接改变结论方向
+- **第三条方法论修正**：**大数十六进制不要靠照片读**，探针一律打印十进制 MB/GB
+- **第四条（本轮新增）**：`kmem_shuffle_claims()` 会随机打乱 claim 顺序，**panic 里的 claim 名每轮都可能不同**——这是 shuffle，不是硬件随机性，别把它当新线索
 - **历史认知修正**：`0012` 曾因 `corrupt patch` 被 CI 整份跳过，stage 10~31 标记从未编进内核 —— 此前所有"停点漂移""死在 `initialize_screen`"的判断均源于此（见 §12.2 / §13 勘误）
 - **路线**：M6 已完成 → M7 `kernel_bootstrap` 收尾（当前卡点）→ M8 8 核 PSCI → M9 UFS/ramdisk → M10 launchd
-- **最新提交/构建**：`412a3cf`（0088，构建中）；上一个实测版 `d3c06d7` / Run `42045809346`
+- **最新提交/构建**：`36ce59d`（0089，构建中）；上一个实测版 `412a3cf` / Run `42049408576`
 
 ### 8.2 调试循环（每轮 ~15 分钟，已全自动）
 1. **改补丁必须单变量**：`0012`（早期控制台/stage 标记）、`0083`（汇编可见化）、`0084`（GIC 打点）、`0085`（console 接管打点）、`0086`（大红数字）各管一段，勿混改
@@ -936,3 +937,68 @@ SWG   free=<MB> claims=<MB> n=13
 ```
 
 用 MB 而不用十六进制，是因为本轮已经证明：**大数十六进制在照片里读不准**，而结论又完全依赖这种数。13 行足以一次定位是谁占了 140GB 中的大头。
+##### 14.7 `0088` 实测：`zones` 一项就占 128GB —— 根因定位（2026-11-05 23:06）
+
+`412a3cf` / Run `42049408576`，引导 23:03:23。十三行全部读出：
+
+```
+SWQ0  zone_meta 512MB
+SWQ1  gIOKitPageableFixed2 96MB
+SWQ2  compressor 2032MB
+SWQ3  gIOKitPageableFixed3 96MB
+SWQ4  gIOKitPageableFixed0 96MB
+SWQ5  ipc_kernel_copy_map 8MB
+SWQ6  bsd_pageable 33MB
+SWQ7  gIOKitPageableFixed1 96MB
+SWQ8  ipc_kernel_map 64MB
+SWQ9  bufferhdr 0MB
+SWQ10 mb 64MB
+SWQ11 io_submap 8MB
+SWQ12 zones 131072MB          ← 128GB，唯一异常项
+SWG   free=48365MB claims=134178MB n=13
+```
+
+**元凶**：`osfmk/kern/zalloc.c:10148`
+
+```c
+KMEM_RANGE_REGISTER_STATIC(zones, &zone_map_range, ZONE_MAP_VA_SIZE);
+```
+
+而 `ZONE_MAP_VA_SIZE` 在 `zalloc.c:162-169` 按平台分两支：
+
+```c
+#if XNU_PLATFORM_MacOSX
+#define ZONE_MAP_MAX      (32ULL << 30)
+#define ZONE_MAP_VA_SIZE  (128ULL << 30)   // 128GB
+#else
+#define ZONE_MAP_MAX      (8ULL << 30)
+#define ZONE_MAP_VA_SIZE  (24ULL << 30)    // 24GB
+#endif
+```
+
+**我们的构建走的是 MacOSX 分支**，于是 `zones` 一项就要 128GB VA；而 `kernel_map` 实测最大空洞只有 **48,365MB（47GB）**。同一份代码在 iOS 分支只要 24GB —— 这才是「Apple 设备不会崩、我们崩」的真正原因。`131072MB = 2³⁷` 这个整数本身就是常量痕迹，不是算歪，是分支选错。
+
+`claims` 总计 134,178MB，减去 `zones` 的 131,072MB，其余 12 项合计仅 3,106MB，全部正常。`zone_meta 512MB` 也偏大，是 `atop(ZONE_MAP_VA_SIZE) × sizeof(zone_page_metadata)` 的衍生值（128GB/4KB × 16B = 512MB），会随 VA 一起降下来。
+
+**另一个观察**：本轮 panic 的 claim 名从 `vm_ptr_range` 变成 `kmem_data_range`（`vm_kern.c:3665`）。原因是 `kmem_shuffle_claims()` 会打乱 claim 顺序，谁先被 `locate` 是随机的——但每个 claim 的 size 都是下溢后的巨值，所以谁先谁崩。**这解释了前几轮 panic 文本不一致，不是硬件随机性。**
+
+**修复：`0089-sweet-zone-map-va-24g`（提交 `36ce59d`）**
+
+只改一个宏，把 MacOSX 分支的 `ZONE_MAP_VA_SIZE` 降为 iOS 的 24GB：
+
+```c
+#if XNU_PLATFORM_MacOSX
+#undef  ZONE_MAP_VA_SIZE
+#define ZONE_MAP_VA_SIZE        (24ULL << 30)
+#endif
+```
+
+预期 claims：24,576(zones) + 96(zone_meta) + 2,571(其余) ≈ **27GB < 48GB 可用**，下溢消失。
+
+安全性核查：
+- `ZONE_MAP_MAX`（32GB）只用于裁剪 `zsize`，不参与 VA 预留，无需同改；
+- `zsize` 本身来自 `sane_size >> 2` 再被 `sane_size >> 1` 夹住，127MB RAM → 约 63MB，远低于任何上限；
+- `static_assert(ZONE_MAP_MAX / (CHAR_BIT * KALLOC_MINSIZE) <= ZBA_PTR_MASK + 1)` 只用 `ZONE_MAP_MAX`，不受本次改动影响；
+- `zone_meta_size`、`vm_submap_size`、`zone_init()` 的 `remaining_size` 都按 VA_SIZE 重新计算，会自动跟随。
+
+**遗留问题**：为什么本构建走 MacOSX 分支？这才是配置层面的根本问题。但把 `XNU_PLATFORM_MacOSX` 整体改成 0 会牵连 kext 模型、驱动加载路径等大量行为，不能与本次单宏修复混在一轮。**先过 kmem，再评估是否整体切 iOS 平台配置。**
