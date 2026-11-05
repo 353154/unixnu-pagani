@@ -1,0 +1,106 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -758,13 +758,16 @@
+ #if SKYWALK
+ 	bsd_init_kprintf("calling skywalk_init\n");
+ 	(void) skywalk_init();
++	printf("SWY2 skywalk_init done\n");
+ #endif /* SKYWALK */
+ #if NETWORKING
+ #if NECP
+ 	/* Initialize Network Extension Control Policies */
+ 	necp_init();
++	printf("SWY3 necp done\n");
+ #endif
+ 	netagent_init();
++	printf("SWY4 netagent done\n");
+ #endif /* NETWORKING */
+ 
+ #if CONFIG_FREEZE
+@@ -780,13 +783,16 @@
+ 	/* Initialize kernel memory status notifications */
+ 	bsd_init_kprintf("calling memorystatus_init\n");
+ 	memorystatus_init();
++	printf("SWY5 memstatus done\n");
+ #endif /* CONFIG_MEMORYSTATUS */
+ 
+ 	bsd_init_kprintf("calling sysctl_mib_init\n");
+ 	sysctl_mib_init();
++	printf("SWY6 sysctl_mib done\n");
+ 
+ 	bsd_init_kprintf("calling bsd_autoconf\n");
+ 	bsd_autoconf();
++	printf("SWY7 autoconf done\n");
+ 
+ #if CONFIG_DTRACE
+ 	dtrace_postinit();
+@@ -851,10 +857,12 @@
+ 	 */
+ 	bsd_init_kprintf("calling net_init_run\n");
+ 	net_init_run();
++	printf("SWY8 net_init_run done\n");
+ #endif /* NETWORKING */
+ 
+ 	bsd_init_kprintf("calling inittodr\n");
+ 	inittodr(0);
++	printf("SWY9 inittodr done\n");
+ 
+ 	/* Mount the root file system. */
+ 	while (TRUE) {
+@@ -862,11 +870,13 @@
+ 
+ 		bsd_init_kprintf("calling setconf\n");
+ 		setconf();
++		printf("SWA1 setconf done\n");
+ #if CONFIG_NETBOOT
+ 		netboot = (mountroot == netboot_mountroot);
+ #endif
+ 
+ 		bsd_init_kprintf("vfs_mountroot\n");
++		printf("SWA2 vfs_mountroot enter\n");
+ 		if (0 == (err = vfs_mountroot())) {
+ 			break;
+ 		}
+--- a/bsd/skywalk/mem/skmem.c
++++ b/bsd/skywalk/mem/skmem.c
+@@ -440,9 +440,13 @@
+ 	(void) skmem_cpu_cache_line_size();
+ 
+ 	skmem_cache_pre_init();
++	printf("SWX1 cache_pre_init done\n");
+ 	skmem_region_init();
++	printf("SWX2 region_init done\n");
+ 	skmem_cache_init();
++	printf("SWX3 cache_init done\n");
+ 	pp_init();
++	printf("SWX4 pp_init done\n");
+ 
+ 	__skmem_inited = 1;
+ 
+--- a/bsd/skywalk/mem/skmem_region.c
++++ b/bsd/skywalk/mem/skmem_region.c
+@@ -377,6 +377,7 @@
+ 	    skmem_usr_buf_seg_size);
+ 
+ 	TAILQ_INIT(&skmem_region_head);
++	printf("SWX5 tailq done\n");
+ 
+ 	skmem_region_update_tc =
+ 	    thread_call_allocate_with_options(skmem_region_update_func,
+@@ -387,13 +388,16 @@
+ 		__builtin_unreachable();
+ 	}
+ 
++	printf("SWX6 thread_call ok\n");
+ 	sg_size = sizeof(struct sksegment);
+ 	skmem_sg_cache = skmem_cache_create("sg", sg_size,
+ 	    sizeof(uint64_t), NULL, NULL, NULL, NULL, NULL, 0);
++	printf("SWX7 sg_cache done\n");
+ 
+ 	/* and start the periodic region update machinery */
+ 	skmem_dispatch(skmem_region_update_tc, NULL,
+ 	    (skmem_region_update_interval * NSEC_PER_SEC));
++	printf("SWX8 dispatch queued\n");
+ 
+ 	__skmem_region_inited = 1;
+ }
