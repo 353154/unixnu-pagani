@@ -421,3 +421,53 @@ v4（`23e7859`）在两处补标记（x=180 深青 = isb 存活，x=220 深品�
 2. x=220 标记调亮为 `0xffcc33dd`（鲜品红），消除读数歧义。
 
 > 排查记录：v8 期间曾怀疑 BootShim 的 C 调用约定导致 lr 未指向 arm_init——经查 stock start.s 在 575 行 `adrp lr, EXT(arm_init)` + 400 行 KVA 转换已正确处理，疑虑排除。`arm_init_tramp` 为 stock 暖启动路径，与本引导流无关。
+
+### 7.15 v9 判决：TG1=2 已入硬件，KVA 近在咫尺 (v9 `cf67a39`)
+
+**TCR 位带（第 900 行）实读**：最左两格「白黑」= **TG1 = `10` = 16KB（标准编码）**——补丁 0083 确认编程进硬件。SH1/IRGN1 等字段亦与预期吻合。
+
+**其余读数**：彩虹带 8 色全亮（CP4 绿、CP5 浅蓝）、微型标记大多点亮；x=220（phystokv）在 24px 暗色块群中归属仍有歧义；`arm_init` 橙块未现。
+
+**v10（`5c723e2`）三重决定性探针**：① `ldr` 直读 KVA 页 + 60×60 大翠绿块（660 行）；② `phystokv` 返回后 60×60 亮品红大块（730 行）；③ `TTBR1_EL1` 位带（960 行）。
+
+**v10 判定表**：
+| 读数 | 结论 | 下一步 |
+| :--- | :--- | :--- |
+| 大翠绿不亮 | TTBR1 数据面挂 → 页表物理地址错 | 按第 960 行 TTBR1 位带修 TTBR1 值 |
+| 翠绿亮、品红不亮 | 数据通、I 侧取指挂（I-TLB/属性） | 检查 KVA L2 条目 XN/attr |
+| 双亮、仍无 arm_init | 冻在 `ret arm_init` 目标页 | 核查 arm_init 页的 KVA 映射覆盖 |
+
+---
+
+## 8. 交接手册（换模型/新会话请先读本节）
+
+> **项目**：OnePlus 13s (pagani/SM8750/Oryon) 移植 XNU-8796 + iOS 16.7 用户态
+> **本地仓库**：`~/unixnu-pagani`（GitHub `353154/unixnu-pagani`，main 分支，CI=Actions macOS-14）
+> **手机**：fastboot 序列号 `3B1F67EA9BBUHK76`，仅 `fastboot boot`（严禁 flash/erase），挂死=长按电源重启
+> **屏幕分辨率** 1216×2640，stride 4864；控制台/检测带布局见 §7 与 `~/Desktop/SCREEN_READ_PROMPT.md`
+
+### 8.1 当前进度快照（2026-11-05 08:30）
+- **已攻克**（按序）：OSLAR_EL1 UD → WXN/A → C=0→C=1 → CSE 致命性（isb/eret 全灭，全窗口 CSE-free 放行）→ **TG1 粒度编码**（苹果私有 1=16K vs ARM 标准 2=16K，补丁 0083）
+- **现场**：MMU 开启全通（CP1~CP5 全亮），冻结点在 `common_start` 尾部：`bl EXT(phystokv)` 前后（首次高半区 KVA 取指）；v10 探针版构建中（commit `5c723e2`），构建哨兵已挂——**手机重启进 fastboot 即自动刷入**，刷入/就绪均有微信通知
+- **路线**：M4（MMU）→ M5（arm_init/C 世界）→ M6 UFS → M7 APFS/launchd → M8 触屏
+
+### 8.2 调试循环（每轮 ~15 分钟）
+1. 改 `xnu/patches/0010-sweet-early-framebuffer-debug.patch`（start.s 的 SWEET 段）；0083 是 TG1 修复，勿动
+2. **推送前必验**：`cd ~/unixnu-pagani/xnu-src && git apply --check ../xnu/patches/0010-*.patch`；新汇编可抽出来用 `clang -c -arch arm64` 冒烟（stub MOV64 宏）
+3. commit+push → CI 自动构建（公库免费不限额）
+4. 哨兵脚本模板见 build_status.log 历史：轮询 run → 下载产物（api.github.com 快，CDN 偶发 6KB/s 重试即可）→ `python3 scripts/build_pagani_payload.py --kernel out/kernel.development.sweet --shim shim/out/Image --out-dir out` 合成 `out/test-boot.img`
+5. 手机进 fastboot → `fastboot boot out/test-boot.img`（~1.1s）
+6. 读屏：用户拍照 + `~/Desktop/SCREEN_READ_PROMPT.md` 协议让 Gemini 转述（本机 vision_analyze 今日不稳）；结果记入本文档 §7.x
+
+### 8.3 微信通知通道（已打通）
+- 推送：`/Users/damon/.hermes/installs/8c379330277d6bde/environments/a5231383ca1545bd8892d6f2844e56e5/venv/bin/python ~/unixnu-pagani/scripts/wxpush.py "消息"`
+- ⚠️ **严禁** `pm.sync_venv(['messaging'])` 装依赖——2026-11-05 曾把这台 8GB Intel Mac 整机 OOM
+- 用户平时就在微信上和 Hermes 对话（gateway PID 见 `hermes gateway status`），微信会话可读本文档与仓库接续工作
+
+### 8.4 经验铁律（全部实测换来的）
+- 一个构建只动一个变量；每个屏障/同步指令后必须紧跟视觉证人（最后一个 checkpoint 的 dsb 永远缺证人）
+- 两条不同指令死同一点 → 找共性（isb/eret 皆 CSE）
+- 无异常+无进度 = 总线/翻译体系冻结；CSE 致命期间异常不可投递（异常入口即 CSE），「无色条」≠「无 fault」
+- 位域解码必须对照宏定义逐位核（TG1 教训：苹果私有置换编码 vs ARM 标准）
+- 老假设未单独验证过 = 嫌疑人而非事实（C=0 的教训）
+- 本机网络：GitHub API 快、产物 CDN 偶发限速，重试就好
