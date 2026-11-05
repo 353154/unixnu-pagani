@@ -1,0 +1,18 @@
+diff --git a/osfmk/vm/vm_kern.c b/osfmk/vm/vm_kern.c
+--- a/osfmk/vm/vm_kern.c
++++ b/osfmk/vm/vm_kern.c
+@@ -3496,9 +3496,14 @@
+ 	 * Determine size of data and pointer kmem_ranges
+ 	 */
+ 	for (uint32_t i = 0; i < kmem_claim_count; i++) {
++		kprintf("SWQ%u %s %lluMB\n", i, kmem_claims[i].kc_name,
++		    (unsigned long long)(kmem_claims[i].kc_size >> 20));
+ 		total_claims += kmem_claims[i].kc_size;
+ 	}
+ 	assert((total_claims & PAGE_MASK) == 0);
++	kprintf("SWG free=%lluMB claims=%lluMB n=%u\n",
++	    (unsigned long long)(largest_free_size >> 20),
++	    (unsigned long long)(total_claims >> 20), kmem_claim_count);
+ 	largest_free_size -= total_claims;
+ 	kprintf("SWK1 claims=%llx lfree=%llx n=%u\n",
+ 	    (unsigned long long)total_claims,
