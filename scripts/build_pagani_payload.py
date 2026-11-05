@@ -25,7 +25,7 @@ def main():
     parser.add_argument("--kernel", required=True, help="Path to compiled XNU kernel (kernel.development)")
     parser.add_argument("--shim", default="", help="Path to BootShim Image binary")
     parser.add_argument("--ramdisk", default="", help="Optional ramdisk image path")
-    parser.add_argument("--boot-args", default="-v sweetfb_native=1 serial=3", help="XNU boot-args")
+    parser.add_argument("--boot-args", default="-v debug=0x8 -enable_kprintf_spam sweetfb_native=1 serial=3", help="XNU boot-args")
     parser.add_argument("--out-dir", default=os.path.join(REPO_ROOT, "out"), help="Output directory")
     args = parser.parse_args()
 

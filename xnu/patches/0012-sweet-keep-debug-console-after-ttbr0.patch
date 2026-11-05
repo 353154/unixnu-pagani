@@ -116,14 +116,14 @@ diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
  sweet_early_mark(unsigned int stage, const char *label)
  {
 -	if (early_disabled || stage > 8) {
-+	if (early_disabled || stage > 20) {
++	if (early_disabled || stage > 40) {
  		return;
  	}
 -	uint32_t color = 0xff00ff00u | (stage * 28u << 16);
 +	uint32_t color = 0xff00ff00u | ((stage & 7u) * 32u << 16);
  	for (unsigned int y = EARLY_HEIGHT - 32; y < EARLY_HEIGHT; y++) {
 -		for (unsigned int x = stage * 64; x < (stage + 1) * 64; x++) {
-+		for (unsigned int x = stage * 48; x < (stage + 1) * 48; x++) {
++		for (unsigned int x = stage * 28; x < (stage + 1) * 28 && x < EARLY_WIDTH; x++) {
  			EARLY_FB[y * EARLY_STRIDE + x] = color;
  		}
  	}
@@ -137,6 +137,15 @@ diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
  	sweet_early_string(": ");
  	sweet_early_string(label);
  	sweet_early_putc('\n');
+@@ -107,7 +112,7 @@
+ void
+ sweet_early_panic(const char *fmt, va_list *args)
+ {
+-	if (early_disabled || early_panicking) {
++	if (early_panicking) {
+ 		return;
+ 	}
+ 	early_panicking = 1;
 @@ -121,9 +126,17 @@
  }
  
@@ -149,7 +158,7 @@ diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
 +	sweet_early_mark(9, "kernel framebuffer VA live");
 +}
 +
-+void
+ void
  sweet_early_disable(void)
  {
 -	sweet_early_mark(8, "leaving bootstrap TTBR0");
@@ -199,7 +208,7 @@ diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
  
  	if (debug_boot_arg) {
  		patch_low_glo();
-@@ -535,9 +536,15 @@
+@@ -535,9 +536,20 @@
  	PE_consistent_debug_inherit();
  
  	/* Setup debugging output. */
@@ -209,12 +218,77 @@ diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
  	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
  	kprintf("kprintf initialized\n");
 +	sweet_early_mark(20, "kprintf startup complete");
-+	if (serial_exists) {
-+		sweet_early_disable();
-+	}
++	extern bool disable_serial_output;
++	extern bool disable_kprintf_output;
++	disable_serial_output = false;
++	disable_kprintf_output = false;
  
  	serialmode = 0;
  	if (PE_parse_boot_argn("serial", &serialmode, sizeof(serialmode))) {
+@@ -569,6 +581,9 @@
+ 		(void)switch_to_serial_console(); /* Switch into serial mode from video console */
+ 		disableConsoleOutput = FALSE;     /* Allow printfs to happen */
+ 	}
++	sweet_early_mark(21, "switch_to_serial_console done");
+ 	PE_create_console();
++	sweet_early_mark(22, "PE_create_console done");
+ 
+ 	/* setup console output */
+ 	PE_init_printf(FALSE);
++	sweet_early_mark(23, "PE_init_printf done");
+ 
+ #if __arm64__
+ #if DEBUG
+@@ -578,8 +593,10 @@
+ #endif
+ 
+ 	cpu_machine_idle_init(TRUE);
++	sweet_early_mark(24, "cpu_machine_idle_init done");
+ 
+ 	PE_init_platform(TRUE, &BootCpuData);
++	sweet_early_mark(25, "PE_init_platform second done");
+ 
+ #if __arm64__
+ 	extern bool cpu_config_correct;
+@@ -588,6 +605,7 @@
+ 	}
+ 
+ 	ml_map_cpu_pio();
++	sweet_early_mark(26, "ml_map_cpu_pio done");
+ 
+ #if APPLE_ARM64_ARCH_FAMILY
+ 	configure_late_apple_regs();
+@@ -596,8 +614,10 @@
+ #endif
+ 
+ 	cpu_timebase_init(TRUE);
++	sweet_early_mark(27, "cpu_timebase_init done");
+ 
+ #if KPERF
+ 	/* kptimer_curcpu_up() must be called after cpu_timebase_init */
+ 	kptimer_curcpu_up();
+ #endif /* KPERF */
+ 
+ 	PE_init_cpu();
++	sweet_early_mark(28, "PE_init_cpu done");
+ 	fiq_context_init(TRUE);
++	sweet_early_mark(29, "fiq_context_init done");
+ 
+ #if HIBERNATION
+@@ -628,6 +648,7 @@
+ 	gDramBase = *dram_base;
+ 	gDramSize = *dram_size;
++	sweet_early_mark(30, "dram props set in chosen");
+ 
+ 	/*
+ 	 * Initialize the stack protector for all future calls
+@@ -647,6 +668,7 @@
+ 	 * against string vulnerabilities
+ 	 */
+ 	__stack_chk_guard &= ~(0xFFULL << 8);
++	sweet_early_mark(31, "entering machine_startup");
+ 	machine_startup(args);
+ }
 diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
 --- a/pexpert/arm/pe_serial.c
 +++ b/pexpert/arm/pe_serial.c
