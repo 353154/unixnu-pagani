@@ -554,20 +554,22 @@ v4（`23e7859`）在两处补标记（x=180 深青 = isb 存活，x=220 深品�
 > **手机**：fastboot 序列号 `3B1F67EA9BBUHK76`，仅 `fastboot boot`（严禁 flash/erase），挂死=长按电源重启
 > **屏幕分辨率** 1216×2640，stride 4864；控制台/检测带布局见 §7 与 `~/Desktop/SCREEN_READ_PROMPT.md`
 
-### 8.1 当前进度快照（2026-11-05 22:35 刷新，**本节为唯一权威状态，旧版本内容已作废**）
+### 8.1 当前进度快照（2026-11-05 22:52 刷新，**本节为唯一权威状态，旧版本内容已作废**）
 - **已攻克**（按序）：OSLAR_EL1 UD → WXN/A → C=0→C=1 → CSE 致命性 → TG1/TG0 粒度真相（`TGran16==0`）→ 原生 4KB 全量内核 → `T1SZ=16` 四级 KVA 页表 → TTBR0 销毁/TTBR1 接管 → `arm_vm_init` + `pmap_bootstrap` → **console 接管（`initialize_screen` 通过）** → **XNU 真实 `kprintf` 上屏** → **`machine_startup` → `kernel_bootstrap` → VM 子系统五级初始化（页表/zone/vm_map/kmem/swap）**
 - **当前死点（真机实测，见 §14.2）**：`kmem_range_init: vm_map_locate_space failing for claim vm_ptr_range @vm_kern.c:3645`。这是 **kernel_map 虚拟空间**分配问题，与物理内存布局无关
-- **正在验证**：`0087` 的四探针 `SWK0`~`SWK3`（commit `d3c06d7`）。核心假设：`0004` 把 `MACH_VM_MAX_ADDRESS_RAW` 压到 36-bit（`0xFC0000000`），可能牵连 `kernel_map->max_offset`，导致 `min > max`
+- **已确认机制（§14.6，`0087` 实测）**：`largest_free_size -= total_claims` **无符号下溢**。`claims = 0x20c2243000 ≈ 140.7GB`，`n=13`；下溢后 `ptr_range_size ≈ 4.6EB`、`kmem_ptr_range` 单段要 `≈140TB` VA，`locate` 必然失败。原假设"`max_offset` 被压到 `0xFC0000000`"**已被推翻**（实测 `max=ffffffff...`），已列入交接黑名单
+- **正在验证**：`0088` 的 `SWQ0`~`SWQ12` + `SWG`（commit `412a3cf`），按十进制 MB 逐项打印 13 个 claim，定位谁占了上百 GB
 - **两条方法论修正（务必遵守）**：① 本环境 `panic()` **不终止**系统，屏幕最后一行 ≠ 死点；② `SWT` 是 `__startup_func` 追踪，不是死循环标记
+- **第三条方法论修正（本轮新增）**：**大数十六进制不要靠照片读**。探针一律打印十进制 MB/GB，否则读数误差会直接改变结论方向
 - **历史认知修正**：`0012` 曾因 `corrupt patch` 被 CI 整份跳过，stage 10~31 标记从未编进内核 —— 此前所有"停点漂移""死在 `initialize_screen`"的判断均源于此（见 §12.2 / §13 勘误）
 - **路线**：M6 已完成 → M7 `kernel_bootstrap` 收尾（当前卡点）→ M8 8 核 PSCI → M9 UFS/ramdisk → M10 launchd
-- **最新提交/构建**：`d3c06d7` / Run `42045809346`
+- **最新提交/构建**：`412a3cf`（0088，构建中）；上一个实测版 `d3c06d7` / Run `42045809346`
 
 ### 8.2 调试循环（每轮 ~15 分钟，已全自动）
 1. **改补丁必须单变量**：`0012`（早期控制台/stage 标记）、`0083`（汇编可见化）、`0084`（GIC 打点）、`0085`（console 接管打点）、`0086`（大红数字）各管一段，勿混改
 2. **推送前必验**：`cd ~/unixnu-pagani/xnu-src && git apply --check ../xnu/patches/0012-*.patch`（**每个**被改的补丁都要 check）
 3. commit + push → **一条命令跑完全链路**：`python3 tools/auto_boot_pipeline.py`
-   —— 自动轮询 CI → 失败则抓日志打印 `: error:` → 下载产物 → 校验内核里是否真含 `SWD00`/`SWE00`/`SWC01` 等标记串（**防再次"补丁没进去"**）→ 合成 `out/test-boot.img` → `adb reboot bootloader` → `fastboot boot`
+   —— 自动轮询 CI → 失败则抓日志打印 `: error:` → 下载产物 → 校验内核里是否真含 `SWD00`/`SWE00`/`SWC01`/`SWK0`/`SWQ%u` 等标记串（**防再次"补丁没进去"**；本轮新增的探针用 `--require "X,Y"` 追加，不必改代码）→ 合成 `out/test-boot.img` → `adb reboot bootloader`（失败会自动重试）→ `fastboot boot`
 4. **读屏协议**：手机停屏后由用户拍照发来 → `ViewImage` OCR 读 `SWDxx`/`SWExx` 与 `kprintf` 文本 → `sips` 裁剪放大 → 必要时 `/tmp/pngdec.py` 逐像素读色带 → 读完再让用户重启（**绝不自动重启**）
 5. 结果按 `§13.x` 追加到本文档，保持"一次实验一个结论"
 
@@ -895,3 +897,42 @@ kmem_range_init: vm_map_locate_space failing for claim vm_ptr_range @vm_kern.c:3
 唯一被采纳的判断：「XNU 强依赖 Apple 格式设备树」——这点正确，但本项目三周前已用 `mkadt.py` 解决，属已完成项。
 
 
+##### 14.6 `0087` 实测结果：`claims` 总量异常，原假设被推翻（2026-11-05 22:49）
+
+`d3c06d7` / Run `42045809346`，产物 16,735,456 字节，四个探针字符串偏移：`SWK0`@421783 / `SWK1`@421855 / `SWK2`@421889 / `SWK3`@422112。真机引导 22:46:51。
+
+**读到的四行**（用户照片 22:49，OCR 逐段放大核对；长十六进制存在个别位不确定性，但量级确定）：
+
+```
+SWK0 kmap min=fffffffeb8000000 max=ffffffffbfffffff lfree=beb5fc000
+SWK1 claims=20c2243000 lfree=fffffffeb293b900 n=13
+SWK2 ptr=3ffffffaca4ef000 data=bffffff05c193000 spray=2d37000 pr=1
+SWK3 claim=kmem_ptr_range size=7ff4cad40000 start=fffffff0429bd000
+```
+
+**三条铁证**（不依赖大数逐位读取）：
+
+| 证据 | 含义 |
+| :--- | :--- |
+| `SWK1 lfree=fffffffeb293b900` 首字符为 `ffff...` | `largest_free_size -= total_claims` **发生无符号下溢**，差值为负 ≈ −5.6GB |
+| `SWK2 ptr=3ffffff...` | 下溢值除以 `((1+1)*2)=4` 得 ≈ 4.6 EB，2⁶² 量级 |
+| `SWK3 size=7ff4cad40000` | 单个 claim 就要 ≈ 140 TB 的 VA |
+
+配套反证：`spray=2d37000`（≈45MB）被 `sane_size / 2` 夹住，因为 `sane_size` 来自真实物理内存（22703 free pages ≈ 88MB）。若下溢没发生，`spray` 应等于 `ptr` 的巨值——它没有，说明代码确实走到了下溢之后。
+
+**原假设（§14.4）已被推翻**：`SWK0` 的 `max` 是 `ffffffff...` 量级，**不是** `0xFC0000000`。`0004` 补丁压缩 `MACH_VM_MAX_ADDRESS` 并没有把 `kernel_map->max_offset` 拉低，此路不通。
+
+**新结论**：崩溃由 `total_claims` 过大触发。`claims = 0x20c2243000 ≈ 140.7GB`，而 `n=13`，平均每项 10.8GB。Apple 自家 arm64 的 `kernel_map` 约 68GB（`0xFFFFFFF000000000`–`0xFFFFFFFFFFFFE000`），**140GB 的 claims 在任何 Apple 设备上都放不下**。所以这不只是"我们的 kernel_map 偏小"，更可能是某一项 claim 的尺寸在本平台被算歪了（`kc_calculate_sz` 回调里按物理内存/页数推算的部分最可疑）。
+
+**方法论教训（第二次同类）**：这一轮又是"假设写得像结论"——§14.4 把"若 max 是 fc0000000 则…"写进了文档主叙事，读的人容易把它当成已确认。今后假设必须留在"假设"段并显式标注，验证前不得进入状态卡。
+
+**下一步：`0088-sweet-kmem-claim-breakdown`**（提交 `412a3cf`）
+
+在 `kmem_add_extra_claims()` 的累加循环里逐项打印，并把大数换成十进制 MB：
+
+```
+SWQ0  <claim_name> <size>MB      ×13
+SWG   free=<MB> claims=<MB> n=13
+```
+
+用 MB 而不用十六进制，是因为本轮已经证明：**大数十六进制在照片里读不准**，而结论又完全依赖这种数。13 行足以一次定位是谁占了 140GB 中的大头。
