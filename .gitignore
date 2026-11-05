@@ -2,3 +2,8 @@ userland/
 xnu-src/
 firmware_dump/
 .DS_Store
+out/
+shim/out/
+__pycache__/
+*.pyc
+build_status.log

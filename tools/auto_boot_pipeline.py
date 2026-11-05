@@ -11,7 +11,18 @@ OnePlus 13s (pagani) XNU 移植 —— 全自动引导流水线
   任何标记缺失即视为「补丁没进去」并直接报错，不再让假象进入真机实验。
 
 安全约束：只执行 `fastboot boot`，绝不 flash / erase。
-用法：python3 tools/auto_boot_pipeline.py [--sha <commit>]
+
+用法：
+  python3 tools/auto_boot_pipeline.py [--sha <commit>] [--require "SWK0,SWP1"]
+                                      [--no-boot] [--force]
+
+  --no-boot  只备镜像、不碰设备（上一轮屏幕还没拍时用）
+  --force    跳过幂等闸门，允许对已引导过的提交再引导一次
+
+幂等：每次引导都会写一行台账到 out/boot_history.jsonl。同一 sha 已 boot 过
+就直接退出，避免"看到 CI success 就再跑一遍"覆盖掉尚未读取的停屏画面。
+设备在 adb/fastboot 两侧都不可见时立即退出（最常见原因是 XNU 正在跑，USB
+不枚举），不再空等 12 分钟。
 """
 import urllib.request, json, time, subprocess, zipfile, io, sys, os
 
@@ -66,6 +77,48 @@ def get(u):
 
 def sh(c):
     return subprocess.run(c, shell=True, capture_output=True, text=True).stdout.strip()
+
+
+# ── 引导台账 ────────────────────────────────────────────────────────────────
+# 2026-11-06 00:29 教训：同一提交 231550f 被引导了两次。原因是脚本既不记录
+# "这个 sha 已经 boot 过"，也没有任何可查痕迹，于是"看到 CI success 就再跑一次"
+# 成了默认动作。第二次引导会把第一次停屏的画面覆盖掉——证据白丢一轮。
+# 从这版起：每次引导写一行 JSONL；同一 sha 已引导过就直接退出，除非 --force。
+BOOT_LOG = os.path.join(ROOT, "out/boot_history.jsonl")
+
+
+def read_boot_log():
+    recs = []
+    if not os.path.exists(BOOT_LOG):
+        return recs
+    for ln in open(BOOT_LOG, encoding="utf-8", errors="replace"):
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            recs.append(json.loads(ln))
+        except Exception:
+            pass
+    return recs
+
+
+def log_boot(event, sha, **extra):
+    rec = {"event": event, "sha": sha[:7],
+           "at": time.strftime("%Y-%m-%d %H:%M:%S"), **extra}
+    os.makedirs(os.path.dirname(BOOT_LOG), exist_ok=True)
+    with open(BOOT_LOG, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    print("LEDGER", json.dumps(rec, ensure_ascii=False), flush=True)
+    return rec
+
+
+def device_visible():
+    """adb 或 fastboot 任一侧能看到本机即为可见。"""
+    st = sh(f"adb -s {SERIAL} get-state 2>/dev/null")
+    if st in ("device", "recovery", "sideload"):
+        return True
+    return bool(sh("fastboot devices"))
+
 
 
 def main():
@@ -179,7 +232,39 @@ def main():
     # 唯一例外：上一轮屏幕还没拍照时，加 --no-boot 只备镜像、不碰设备。
     if "--no-boot" in sys.argv:
         print("NO-BOOT mode: image staged, device untouched", flush=True)
+        log_boot("staged", sha, mode="no-boot")
         return 0
+
+    # ── 幂等闸门（2026-11-06 00:29 新增）────────────────────────────────
+    # 同一提交已引导过就不再碰设备。这是为了防止"看到构建成功就再跑一遍"，
+    # 把上一次还没读的停屏画面覆盖掉。
+    done = [r for r in read_boot_log()
+            if r.get("sha") == sha[:7] and r.get("event") == "booted"]
+    if done and "--force" not in sys.argv:
+        last = done[-1]
+        print(f"ALREADY BOOTED {last['sha']} at {last['at']} —— 跳过", flush=True)
+        print("同一提交已引导过，不重复引导。确认要重跑请加 --force。", flush=True)
+        return 0
+
+    # ── 设备可见性预检（2026-11-06 00:29 新增）──────────────────────────
+    # 旧版在设备两边都不可见时会干等 20×3s + 240×3s ≈ 12 分钟才报错，期间
+    # 完全没有输出。实测最常见的"不可见"是设备正在跑 XNU（USB 不枚举），
+    # 这种情况重试引导毫无意义，应当立刻停下让用户拍照。
+    seen = False
+    for i in range(4):
+        if device_visible():
+            seen = True
+            break
+        if i == 0:
+            sh("adb start-server")
+        time.sleep(3)
+    if not seen:
+        print("DEVICE NOT VISIBLE —— adb 和 fastboot 都看不到设备", flush=True)
+        print("最常见原因：设备正在跑 XNU 内核（USB 不枚举）。", flush=True)
+        print("此刻不要重试引导，先拍照读屏，再重启回 Android。", flush=True)
+        log_boot("skipped_invisible", sha, reason="adb+fastboot both empty")
+        return 4
+
 
     # 只要 adb 侧能看到本机序列号就重启（get-state 在设备刚重枚举时会返回 offline/空，
     # 曾因此跳过 reboot 然后干等 fastboot 十分钟）
@@ -204,9 +289,17 @@ def main():
         dev = sh("fastboot devices")
         if dev:
             print("FASTBOOT", dev, flush=True)
-            print(sh(f"fastboot boot {os.path.join(ROOT, 'out/test-boot.img')}"), flush=True)
-            print("BOOTED", time.strftime("%H:%M:%S"), flush=True)
-            return 0
+            out = sh(f"fastboot boot {os.path.join(ROOT, 'out/test-boot.img')}")
+            print(out, flush=True)
+            ok = "OKAY" in out or "Booting" in out
+            print("BOOTED" if ok else "BOOT FAILED", time.strftime("%H:%M:%S"), flush=True)
+            log_boot("booted" if ok else "boot_failed", sha,
+                     serial=SERIAL,
+                     image_mtime=time.strftime(
+                         "%H:%M:%S", time.localtime(
+                             os.path.getmtime(os.path.join(ROOT, "out/test-boot.img")))),
+                     out=out.replace("\n", " | ")[:200])
+            return 0 if ok else 5
         # 60 秒还没出现：可能 reboot 没生效，或手机停在 Android，重发一次
         if i and i % 20 == 0:
             if adb_ready():
@@ -214,6 +307,7 @@ def main():
                 print(f"  re-issued reboot bootloader @ {i * 3}s", flush=True)
         time.sleep(3)
     print("fastboot device never appeared", flush=True)
+    log_boot("boot_failed", sha, reason="fastboot never appeared")
     return 3
 
 
