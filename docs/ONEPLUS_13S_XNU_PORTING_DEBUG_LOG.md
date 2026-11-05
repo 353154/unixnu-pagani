@@ -1282,3 +1282,39 @@ userland/mnt → 空（尚未解包）
 - **C** 先 A 打通 exec，再切 B。
 
 同时把 iOS 目标拆成 L1（iOS 平台语义的内核）/ L2（exec 一个 iOS 二进制）/ L3（launchd）/ L4（SpringBoard 上屏），并如实标注 **L4 受 DCP + Metal 阻塞**：SpringBoard 自 iOS 10 起只走 Metal，Adreno 830 在 XNU 内没有 GPU 驱动也没有显示控制器驱动。L1–L3 属工程问题，L4 属能力缺口，两者不能混为一谈。
+
+### 14.15 `0095` 实测：`skmem_init` 整段跑完，死点后移到 `nexus_init`（2026-11-06 01:02 引导，提交 `1a92e67`）
+
+照片读到的标记（两张合看，屏幕顶部为最新、底部更旧）：
+
+```
+SWX6 thread_call ok → SWX7 sg_cache done → SWX8 dispatch queued
+→ SWX2 region_init done → SWX3 cache_init done → SWX4 pp_init done      ← 最后一个
+（其后无任何新行，后面的 SWP6..SWV3、bsd_init 早期日志都比它更旧）
+```
+
+`SWY2` 未出现，`SWA2` 自然也没有。
+
+**结论一：三条可疑语句全部排除。** `thread_call_allocate_with_options()` 成功、`skmem_cache_create("sg")` 成功、`skmem_dispatch()` 的延迟 thread call 成功排入。**`skmem_init()` 完整返回**（`SWX4 pp_init done`）。这把 §14.13 留下的"最大未知"消掉了一半：至少"排一个延迟 thread call"这一步不需要定时器中断就会返回。
+
+**结论二：上一轮我判"SWX8 缺失即坐实定时器问题"的推理作废。** 它是排进去了，但"到期能不能被唤醒"仍未验证——`skmem_dispatch` 只是 `thread_call_enter_delayed`，入队即返回。这条未知继续挂着，等真正需要 deadline 唤醒时（用户态调度、`nanosleep`）才会暴露。
+
+**结论三：死点在 `nexus_init()` 或 `channel_init()`。** `skywalk_init()` 里 `skmem_init()` 之后是：
+
+```c
+	SK_LOCK();
+	skmem_init();                 // ← SWX4 在这里
+	error = nexus_init();         // ← 死在这里面？
+	if (error == 0) error = channel_init();   // ← 或这里
+	if (error != 0) skywalk_fini();
+	SK_UNLOCK();
+```
+
+整段在 `SK_LOCK()` 内，任何一处等锁/等分配都是静默停屏。`0096`（`f65e20a`）在 `nexus_init` 内打 `NX1..NX5`、在 `skywalk_init` 内打 `SK0`/`NX6`/`CH1`/`SK1..SK4`。
+
+**结论四（判读方法上的教训）：屏幕布局是"顶部最新"。** 本轮两张照片：屏幕顶部是 `SWX6..SWX4`，屏幕底部是 `skywalk_init`/`SWX1`/`SK_ERR` 加彩条。若按"从上到下 = 时间顺序"读，会得出"先执行 SWX4 再执行 SWX1"的荒谬结论。真实原因是 fbcon 写指针绕回后从顶部开始覆盖。**加上 §2 早已记过的"行序不可靠"，这条现在是第二次踩到，已写进 §7.1 的判读注意。**
+
+**顺带记录两条与 iOS 目标直接相关的观察**：
+
+- `SWEET: trust caches unavailable (image4/AMFI not installed)` —— 我们的 AMFI 是 `SWEET` 桩，没有 image4 验证、也没有 trust cache。L2/L3 要 exec 真正的 iOS 二进制时，这条必须先解（checkra1n 系的做法是打补丁让 AMFI 放行 + 注入假 trust cache）。
+- `mcache: 1 CPU(s), 64 bytes CPU cache line size` —— 仍是单核，M8 未做。

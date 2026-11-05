@@ -41,14 +41,15 @@ ls xnu/patches/ | tail -5                            # 最近加了什么探针
 | 项 | 值 |
 | :--- | :--- |
 | **最终目标** | **在这台手机上引导 iOS 16 用户态**（iPhone X `iPhone10,3` / iOS 16.7.16 `20H392`，根盘已备于 `userland/rootfs_rw.dmg`）。**不是**"做个自绘界面"——任何把目标降级为"能看到点东西"的方案都不算达成。分层见 §7.0 |
-| 当前阶段 | **M9 推进中（2026-11-06 00:48 实测）**：`bsd_init()` 越过 `IOKitInitializeTime`，一口气跑过 `vfsinit` → MAC 策略（AMFI / Sandbox / HFS）→ `mbinit` → `audit/knote/eventhandler/aio/pshm/psem` → `nwk_wq/dlil/socketinit/domaininit`，停在 `skywalk_init()` 内部。**这是 M7 之后单轮推进最远的一次，跨过 12 个子系统** |
-| 最新内核提交 | `1a92e67`（`0095`：skywalk 内部 + 挂根全链路打点 `SWX1..8` / `SWY2..9` / `SWA1..2`），**构建中** |
-| 最新构建 | `fcb0a59`（`0094`）/ Run `62` success，**已实测**；`1a92e67` 的 Run 待查 |
-| 最新引导 | `fcb0a59` 00:48 引导（台账原记为 `boot_failed`，已按屏幕实证更正为 `booted`）；`1a92e67` 构建完将自动引导 |
-| 屏幕最后一行 | `skmem_region_init  seg_size 16384, md_seg_size 16384, drv_buf_seg_size 65536 [eff 65536], usr_buf_seg_size 16384`（`bsd/skywalk/mem/skmem_region.c:374` 的 `SK_ERR`），此后只有彩条、无任何文字 |
-| 死点 | `skywalk_init()` 内部、`skmem_region_init()` 的 `SK_ERR` 之后。三条候选，全都没有输出：`thread_call_allocate_with_options`（失败会 panic，但无 panic 输出）、`skmem_cache_create("sg")`、`skmem_dispatch`（排延迟 thread call，**需要定时器中断**）。`0095` 的 `SWX5..SWX8` 一次分开 |
-| 已确认根因（前四关） | ① `zones` 索取 128GB VA 致 kmem claims 下溢（`0089`）；② video console 用未映射的 `vinfo.v_baseaddr` 绘制（`0090`）；③ `kperf_init_early` → `ml_wait_max_cpus()` 永久睡眠，置位者只被不存在的 IOKit CPU 驱动调用（`0092`）；④ `IOKitInitializeTime` 等不存在的 `IORTC`（`0094`，**已验证通过**：`SWT2`/`SWT4` + `calling vfsinit` 全部出现） |
-| 下一步动作 | 读 `SWX1..SWX8`，**编号最大的即死点**。出现 `SWX4` = `skywalk_init` 已返回，继续看 `SWY2..`；出现 `SWA2` = 已到 `vfs_mountroot` 门口，**下一步必须准备 ramdisk，不是继续改代码** |
+| 当前阶段 | **M9 推进中（2026-11-06 01:02 实测，`0095`）**：`bsd_init()` 越过 `IOKitInitializeTime` 后连过 12 个子系统进入 `skywalk_init()`，**`skmem_init()` 已整段跑完**（`SWX1`/`SWX6`/`SWX7`/`SWX8`/`SWX2`/`SWX3`/`SWX4` 全部出现，见 §14.15），停在 `nexus_init()` 或 `channel_init()` 里，`SWY2` 未出现 |
+| 最新内核提交 | `f65e20a`（`0096`：`nexus_init` 内 `NX1..NX5`、`skywalk_init` 内 `SK0`/`NX6`/`CH1`/`SK1..SK4`），**构建中** |
+| 最新构建 | `1a92e67`（`0095`）/ Run `63` success，**已实测** |
+| 最新引导 | `1a92e67` 01:02:35 引导成功（`fastboot boot` OKAY）；`f65e20a` 构建完将自动引导 |
+| 屏幕最后一行 | 按写入顺序最后一条是 `SWX4 pp_init done`（`skmem_init()` 返回）。**注意照片布局是反的**：写指针绕回后，屏幕**顶部**是最新内容、底部反而更旧 |
+| 死点 | `skywalk_init()` 里 `skmem_init()` 返回之后的 `nexus_init()` / `channel_init()`。这一段整段在 `SK_LOCK()` 内，任何一处等锁或等分配都会表现为静默停屏 |
+| 已确认根因（前五关） | ① `zones` 索取 128GB VA 致 kmem claims 下溢（`0089`）；② video console 用未映射的 `vinfo.v_baseaddr` 绘制（`0090`）；③ `kperf_init_early` → `ml_wait_max_cpus()` 永久睡眠（`0092`）；④ `IOKitInitializeTime` 等不存在的 `IORTC`（`0094`）；⑤ `skywalk_init` 内的 `skmem_region_init` 三条可疑语句**已排除**：`thread_call_allocate` / `skmem_cache_create("sg")` / `skmem_dispatch` 全部通过，说明**延迟 thread call 能排进去、`skmem_init` 不依赖定时器中断也能走完**（`0095` 实测） |
+| 下一步动作 | 读 `NX1..NX6` / `CH1`，**编号最大（或最后一个出现）的即死点**。`CH1` 出现 = `skywalk_init` 通过，继续看 `SWY2..`；`SWA2` 出现 = 已到 `vfs_mountroot` 门口，转 §7.0 的 APFS 岔路 |
+| 台账快照 | 自动生成 11-06 00:56 · HEAD `1a92e67` · 最新 CI Run 63 `1a92e67` in_progress · 最近引导 `fcb0a59` 00:48:05 booted |
 | 台账快照 | 自动生成 11-06 00:56 · HEAD `1a92e67` · 最新 CI Run 63 `1a92e67` in_progress · 最近引导 `fcb0a59` 00:48:05 booted |
 
 ---
@@ -307,17 +308,44 @@ L2/L3 的两个前置，现在就该并行准备，别等挂根那天：
 | `SWA1` | `setconf()` 之后 | **已选定根设备** |
 | `SWA2` | `vfs_mountroot()` 调用前 | **已到挂根门口** |
 
+**`0095` 实测（2026-11-06 01:02 引导）：`skmem_init` 全通，死点后移到 `nexus_init()`。** 屏上实际出现 `SWX1`、`SWX6`、`SWX7`、`SWX8`、`SWX2`、`SWX3`、`SWX4`，`SWY2` 未出现。
+
+> ⚠️ **顺序陷阱（本轮新增）**：`SWX6/7/8` 打印在 `SWX2/3/4` **之前**。因为三条可疑语句位于 `skmem_region_init()` 内部，而 `SWX2/3/4` 是 `skmem_init()` 里它之后的步骤。上表编号是"打点时的编号"，**不是执行顺序**。判读只认"最后一个出现的是谁"，不要按编号大小排序。
+>
+> ⚠️ **照片布局陷阱（本轮新增）**：写指针绕回后，屏幕**顶部是最新内容**、底部反而更旧。本轮照片里 `SWX4` 在屏幕顶部、`SWX1`+`SK_ERR` 在底部彩条上方，属正常现象，不代表顺序倒错。
+
+`0096` 打点（`f65e20a`）：
+
+| 标记 | 位置 | 出现即证明 |
+| :--- | :--- | :--- |
+| `SK0` | `skmem_init();` 之后 | 与 `SWX4` 重复，用于确认顺序 |
+| `NX1` | `RB_INIT(&nx_head)` 之后 | 进入 `nexus_init` |
+| `NX2` | `na_init()` 之后 | nexus adapter 注册表建成 |
+| `NX3` | `nxdom_attach_all()` 之后 | 内建 domain 全部 attach 完 |
+| `NX4` | `nxctl_init()` + `retain` 之后 | 内核 nexus 控制器句柄建成 |
+| `NX5` | `nxctl_traffic_rule_init()` 之后 | `nexus_init` 跑到底 |
+| `NX6` | `nexus_init()` 返回后 | **`nexus_init` 整个返回了**（带 `err` 值） |
+| `CH1` | `channel_init()` 返回后 | **`skywalk_init` 主体全通** |
+| `SK1` | `SK_UNLOCK()` 之后 | 锁已释放 |
+| `SK2` | `sk_dump_buf` 分配后 | `Z_WAITOK` 大块分配能成功 |
+| `SK3` | `netns_init`/`protons_init`/`flowidns_init` 之后 | 三个名字空间建成 |
+| `SK4` | `skywalk_self_tests()` 等之后 | DEBUG 自检不会挂 |
+
 **按结果分支（左列命中即为结论）：**
 
 | 现象 | 结论与下一步 |
 | :--- | :--- |
-| `SWX5` 有、`SWX6` 无 | `thread_call_allocate_with_options()` 挂住。查 thread_call 子系统是否已初始化（`thread_call_initialize` 在 `kernel_bootstrap` 里，若有条件编译差异需核对） |
-| `SWX6` 有、`SWX7` 无 | `skmem_cache_create("sg")` 挂住。查 `sg` 这个 skmem_cache 的 zone/segment 分配路径 |
-| `SWX7` 有、`SWX8` 无 | `skmem_dispatch()` 挂住。它是 `thread_call_enter_delayed`，**说明延迟定时器排不进去 —— 也就是说"deadline 唤醒"确实有问题**，这会同时解释 `0094` 为什么只能靠跳过 RTC 绕开。优先级最高的一类根因 |
-| `SWX8` 有、`SWX2`/`SWX3` 无 | `skmem_region_init` 返回或 `skmem_cache_init` 内部挂。二分 `skmem_cache_init` |
-| `SWX4` 有、`SWY2` 无 | `skywalk_init()` 返回路径挂（`skmem_sys_region_init` 等后续步骤） |
-| `SWA2` 出现 | **已到 `vfs_mountroot`。这一关的性质变了：不是 bug，是缺 ramdisk。立刻转 M9 准备根文件系统，不要再改内核代码** |
-| 一个 `SWX` 都没有 | `0095` 没进内核，看流水线 `MARK SWX1` 是否为负 |
+| `NX1` 都没有 | 卡在 `SK_LOCK()` 二次获取（`skmem_init` 内部没释放干净）或 `nexus_init` 入口断言 |
+| `NX1` 有、`NX2` 无 | `na_init()` 挂：查 nexus adapter 的 `lck_mtx` 与 zone 分配 |
+| `NX2` 有、`NX3` 无 | `nxdom_attach_all()` 挂：逐个 domain 二分（netif / flowswitch / monitor / kpipe / upipe） |
+| `NX3` 有、`NX4` 无 | `nxctl_init()` 挂：它建 `kern_nexus_controller` 对象，查 `proc_*` 与 `kauth_cred` 路径 |
+| `NX4` 有、`NX5` 无 | `nxctl_traffic_rule_init()` 挂 |
+| `NX5` 有、`NX6` 无 | `nexus_init` 返回路径（`__nx_inited = 1` 之后仍有 `printf` 前的代码，理论上不该停）——若真出现，怀疑编译优化把 `NX6` 挪位，改看 `CH1` |
+| `NX6` 有、`CH1` 无 | `channel_init()` 挂：下轮在 `channel.c` 内打点 |
+| `CH1` 有、`SWY2` 无 | 只剩 `SK2/SK3/SK4` 三段（`sk_alloc_data` 大块分配 / 名字空间 / DEBUG 自检） |
+| `SWY2` 出现 | **`skywalk_init` 通过。** 后面 `SWY3..SWA2` 是一路顺跑的近路，重点盯 `SWA2` |
+| `SWA2` 出现 | **已到 `vfs_mountroot`。性质变了：不是 bug，是缺根盘。转 §7.0 的 APFS 岔路，别再改内核代码** |
+| 一个 `NX` 都没有、`SWX4` 也没有 | `0096` 没进内核，看流水线 `MARK SK0` 是否为负 |
 | 卡在 `SWA1` 与 `SWA2` 之间 | `setconf()` 内选根设备挂住，查 `bsd_autoconf` 注册的 `mountroot` |
 
 `bsd_init()` 关键序列（行号对 `bsd/kern/bsd_init.c`，**状态截至 `fcb0a59` 实测**）：
