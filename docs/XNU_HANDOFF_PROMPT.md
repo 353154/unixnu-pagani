@@ -20,7 +20,7 @@
 
 | 层级 | 给什么 | 为什么 |
 | :--- | :--- | :--- |
-| **必需** | `docs/XNU_HANDOFF_PROMPT.md`（本文件，桌面有同名副本） | 唯一入口，自包含 |
+| **必需** | `docs/XNU_HANDOFF_PROMPT.md`（本文件；归档副本在 `~/Documents/OnePlus13s-XNU移植/`） | 唯一入口，自包含 |
 | **必需（非文件）** | 仓库路径 `~/unixnu-pagani` + 手机已连接 + 设备序列号 `3B1F67EA9BBUHK76` | 不动手就没法验证任何结论 |
 | **按需** | `ONEPLUS_13S_XNU_PORTING_DEBUG_LOG.md` 的 **§14**（本轮实测）、`MILESTONE_REPORT.md` **§五** | 要追溯细节时再读，不要整份给 |
 | **按需** | `hardware_baseline.md` / `hardware_specs.md` | 硬件事实，改动硬件相关代码前读 |
@@ -338,8 +338,9 @@ curl -s "https://api.github.com/repos/353154/unixnu-pagani/actions/runs?per_page
 # 2 本轮结论已落盘（不是只在上面的聊天里）
 grep -n "2026-11-05" ~/unixnu-pagani/docs/ONEPLUS_13S_XNU_PORTING_DEBUG_LOG.md | tail -5
 
-# 3 桌面副本与仓库一致（用户的视口是桌面）
-diff -q ~/unixnu-pagani/docs/XNU_HANDOFF_PROMPT.md ~/Desktop/XNU_HANDOFF_PROMPT.md
+# 3 归档副本与仓库一致（2026-11-05 起桌面已清空，改放文稿）
+diff -q ~/unixnu-pagani/docs/XNU_HANDOFF_PROMPT.md \
+        ~/Documents/OnePlus13s-XNU移植/XNU_HANDOFF_PROMPT.md
 
 # 4 补丁完整性没被本轮改动破坏
 cd ~/unixnu-pagani/xnu-src && git apply --check ../xnu/patches/00*.patch 2>&1 | head
@@ -355,12 +356,13 @@ cd ~/unixnu-pagani/xnu-src && git apply --check ../xnu/patches/00*.patch 2>&1 | 
 不必重写文档，只做：
 
 1. 更新本文件 **§0 状态卡 + §2 黑名单 + §3 死点 + §7 下一步**——这四节就是交接的全部有效内容
-2. 同步桌面副本（用户视口）：
+2. 同步归档副本（`~/Documents/OnePlus13s-XNU移植/`，2026-11-05 起桌面不再放这个）：
    ```bash
    cp ~/unixnu-pagani/docs/XNU_HANDOFF_PROMPT.md \
-      ~/unixnu-pagani/docs/ONEPLUS_13S_XNU_PORTING_DEBUG_LOG.md ~/Desktop/
+      ~/unixnu-pagani/docs/ONEPLUS_13S_XNU_PORTING_DEBUG_LOG.md \
+      ~/Documents/OnePlus13s-XNU移植/
    ```
-3. 把 `~/Desktop/粘贴给新Agent.txt` 里"当前节点"那段同步成本轮结论
+3. 把 `~/Documents/OnePlus13s-XNU移植/粘贴给新Agent.txt` 里"当前节点"那段同步成本轮结论
 
 然后把 §0 状态卡第一行改成新时间，并确认 `git log -1` 与状态卡一致。
 
