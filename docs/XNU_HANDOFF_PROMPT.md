@@ -177,6 +177,30 @@ python3 ~/unixnu-pagani/tools/auto_boot_pipeline.py --sha <commit>
 
 它会拒绝引导"标记缺失"的构建，避免假象上真机。
 
+### 6.5 改一轮的完整闭环（照这个顺序，不要跳步）
+
+```bash
+# 1. 写补丁：放进 xnu/patches/，编号递增，前缀 sweet，文件名决定应用顺序
+#    （CI 把 xnu/patches/*.patch 全部拷进 dxb/patches/，由 build.sh 按序应用）
+~/unixnu-pagani/xnu/patches/0090-sweet-<一句话描述>.patch
+
+# 2. 本机先验证能应用（xnu-src 是残缺快照，只对 osfmk/pexpert 有效）
+cd ~/unixnu-pagani/xnu-src && git apply --check ../xnu/patches/0090-*.patch
+
+# 3. 提交推送 —— 只有 xnu/patches/** 和 workflow 文件的改动才会触发 CI
+cd ~/unixnu-pagani && git add xnu/patches/0090-*.patch && git commit -m "..." && git push
+
+# 4. 挂全自动流水线（约 15 分钟构建，之后自动下载→校验标记→合成→引导）
+python3 ~/unixnu-pagani/tools/auto_boot_pipeline.py --sha $(git rev-parse --short HEAD)
+
+# 5. 设备停屏 → 请用户拍照 → 读屏 → 结论落盘（§9.2）
+```
+
+两条关键事实：
+
+- **CI 只监听 `xnu/patches/**` 与 workflow 文件。** 改 `docs/` 不会触发构建，所以文档可以随时提交；反过来，如果推了补丁却十分钟没动静，先看改动路径对不对。
+- **`xnu-src` 是残缺快照**（缺 `config/MASTER.arm64.sweet` 等），本地无法完整编译，只能做 `git apply --check`。真正的编译只在 CI 的 `macos-14` 上发生，本地没有可用交叉工具链。
+
 ---
 
 ## 7. 下一步该做什么（精确到文件）
