@@ -1500,3 +1500,28 @@ make[1]: *** [build_exporthdrs_mi_bootstrap_DEVELOPMENT^ARM64^BCM2837] Error 2
 所以自建 UEFI 树 = 复制 `paganiPkg` → `oneplus13tPkg` 并改内部 `PLATFORM_NAME`/`OUTPUT_DIRECTORY`/`FLASH_DEFINITION`、复制 `pagani.toml` → `oneplus13t.toml`；唯一未知是那个 pagani 专用 Mu 补丁。`board.toml` 的 `[firmware]` 会把它 `git -C {edk2} apply`，缺失会直接报错，需先用 `patches = []` 或自写等价补丁跑通。
 
 **遗留待办：** `353154/unixnu-pagani-ci`（一个空仓库，建了但推送失败）无法用当前 token 删除——令牌只有 `repo, workflow` 作用域，缺 `delete_repo`，需用户在网页上删掉。
+
+### 14.20 第一次 CI 失败＝设备仓库与主仓库版本漂移（2026-11-06 02:00）
+
+Run 42077142165 在 `Check configuration and production contracts` 一步失败，比编译早得多：
+
+```
+File ".../device/scripts/test-format2.py", line 97, in <module>
+    assert len(chosen['random-seed']) == 64
+AssertionError
+```
+
+**根因是版本漂移，不是我们的环境。** 设备仓库 `upstream.rev` 钉的是 `a6ff776`（*Pin complete legacy display pixel copy integration*），而该版本的主仓库把 ADT 随机种子改成了 256 字节：
+
+```
+a6ff776:scripts/unixnu/devicetree.py:309   chosen = [('random-seed', os.urandom(256)), ...
+4184df2:scripts/unixnu/devicetree.py:295   chosen = [('random-seed', os.urandom(64)),  ...
+```
+
+设备仓库里的契约测试还停在 64，于是 `a6ff776` + 设备仓库 main 这个组合**自身就是红的**——与 fork、与我们的机器都无关。
+
+**处理：** 把 fork 的 `upstream.rev` 改回 `4184df2f7da657057666c2527302c29a90f0e733`——这正是 `MIGRATION.md` 表格里列的 *Tested source revision*，也就是产出过能进 iPadOS 桌面的那些构建所用的版本（提交 `0b19609`，用 Contents API 改的，只动这一个文件）。重新 dispatch → **Run 42078230694**（queued）。
+
+顺带把本地 `Mu-Silicium` 子模块拉齐（3.2 GB，`EXIT=0`，`Mu_Basecore` + `Common/Mu` 就位），下一步可以在本地编 UEFI 固件。
+
+**教训：** 设备仓库的 `upstream.rev` 会跟着主仓库前进，但设备仓库自己的契约测试不一定同步更新；以后再遇到「一处断言莫名失败」，先比对 `upstream.rev` 与 `MIGRATION.md` 的 tested revision 是否一致。
