@@ -1525,3 +1525,36 @@ a6ff776:scripts/unixnu/devicetree.py:309   chosen = [('random-seed', os.urandom(
 顺带把本地 `Mu-Silicium` 子模块拉齐（3.2 GB，`EXIT=0`，`Mu_Basecore` + `Common/Mu` 就位），下一步可以在本地编 UEFI 固件。
 
 **教训：** 设备仓库的 `upstream.rev` 会跟着主仓库前进，但设备仓库自己的契约测试不一定同步更新；以后再遇到「一处断言莫名失败」，先比对 `upstream.rev` 与 `MIGRATION.md` 的 tested revision 是否一致。
+
+### 14.21 上游把可引导内核当 CI 产物公开了；以及"为什么只有 iPadOS 这一个 profile"（2026-11-06 01:55）
+
+**一、资源是公开的，而且正是我们缺的那一半。**
+
+`IssacL04/UniXNU-Pagani_SM8750` 的 Actions 里有 **51 个 artifact**，全部叫 `oneplus13t-metal-N`，最新 `metal-36`（11-04 22:55，107 MB）。用任意 GitHub 账号的 token 即可下载（公开仓库的 artifact 不要求协作者身份）。实测下载并解包内容：
+
+| 条目 | 大小 | 用途 |
+| :--- | :--- | :--- |
+| `kernel/kernel.macho` | 128,835,584 B | **编好并已 prelink 的 XNU**（magic `cffaedfe` = MH_MAGIC_64） |
+| `kernel/kernel.json` | 17 MB | slide=`-16777216`、`original_sha256`/`native_sha256`、kext 组件清单（含 `AppleMobileFileIntegrity`） |
+| `ram-data/data.dbrdisk` + `seed.json` | 1 MB | 1 GiB RAM Data 的种子盘 |
+| `metal/owner-trust.bundle` | 61 KB | AMFI trust cache bundle |
+| `metal/data.dbrdisk`、`metal/data.json` | 37 MB | A830 运行时的 Data 盘 |
+| `tree/build/adreno-metal-plugin/**` | 37 MB | `NativeAdrenoMetal.bundle`、`libvulkan_freedreno.dylib`、`adrenoprobed` + entitlements/plist |
+| `candidate.config`、`status.json`、`logs/**` | — | 解析后的完整 XNU 配置、构建身份、44 MB 内核日志 |
+
+该步的名字就是 **"Upload candidate build outputs for local boot packaging"**——上游明确把"内核在 CI 编、镜像在本地打"作为分工。**结论：我们的内核编译不再是关键路径**，`./unixnu payload` / `bootimg` 可以直接吃 `metal-36` 的内核。仍缺的只有 UEFI 的 `SILICIUM_UEFI.fd`（本地 `Mu-Silicium` 子模块已拉齐 3.2 GB，含 `Platforms/OnePlus/paganiPkg`）与 boot.img 打包本身。
+
+**二、"为什么一直是 iPadOS"：因为框架里只有一个 OS profile。**
+
+```
+UniXNU-maintain/profiles/os/          → 仅 ipados-17.7.11-21H461（共 1 个）
+issac/board.toml:7                    → os_profile = "ipados-17.7.11-21H461"
+issac/porting.toml:6                  → os_profile = "ipados-17.7.11-21H461"
+profiles/os/ipados-.../profile.toml   → xnu 10063.141.1 / darwin 23.6.0 / iPad7,1(j120ap) / chip_id 32785
+```
+
+`profile.toml` 把 xnu 版本、IPSW URL、`StaticTrustCache` 的 sha256 全部钉死。**这不是我改用户目标，而是这条线唯一存在的目标平台。**
+
+选 iPad 而不是 iPhone 的硬约束如下：无 PAC 是前提（`A11` iPhone X 与 `A10X` iPad Pro 2 代都不带 PAC），但只有 **A10X 的 iPad Pro 2 代（iPad7,1/7,2）能升到 iPadOS 17.7.11 = Darwin 23.6 = xnu 10063**；iPhone X 最高只到 iOS 16.7.16 = Darwin 22 = **xnu 8796**。也就是说：**"更新的内核"与"iPhone 形态的 iOS"在无 PAC 的机器上是互斥的**。上游为了拿到 10063（4K 页补丁、A830 Metal、AMFI 原样保留都建立在这一版上）只能选 iPad。我们旧仓库 `ios-sweet` 那条线走的正是 xnu 8796 + iPhone X iOS 16.7.16。
+
+**推论（待用户决策）：** 若要字面意义上的 iOS，需新增 `profiles/os/ios-16.7.16-20H392`（`d22ap`、IPSW 本地已有），并把整套驱动/kit 回退到 8796——相当于把两条线合并；若接受 iPadOS 17.7.11，则用户态同源（launchd/SpringBoard/设置/锁屏一致），只是机型自报为 iPad。
