@@ -141,6 +141,8 @@ cd ~/unixnu-pagani/xnu-src && git apply --check ../xnu/patches/0012-*.patch   # 
 
 **每次改补丁后，必须验证它真的被应用了**：CI 日志里 grep `Skipping patch`。`0012` 曾因 hunk 计数错被静默跳过数轮，而构建一直 success —— 这是本项目最贵的一次教训。
 
+**校验标记自身也必须验证**（2026-11-05 实例）：曾把 `b"SWEET EARLY 31"` 写进 `REQUIRED_MARKS`，而内核里根本没有这个字面量——阶段号是 framebuffer 直绘，不走 `kprintf`。结果构建成功、`0088` 探针也确实在核心里，却被自己的校验器判红。**加标记前先 `blob.find()` 确认它存在**，否则校验器会变成新的误报源。
+
 推荐用仓库内脚本跑全链路（自动校验标记串是否真在内核里）：
 
 ```bash
