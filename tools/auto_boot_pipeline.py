@@ -54,8 +54,9 @@ def main():
 
     run = None
     for _ in range(30):
-        for r in get(f"https://api.github.com/repos/{REPO}/actions/runs?per_page=5")["workflow_runs"]:
-            if r["head_sha"] == sha:
+        # 允许传短 sha：用 startswith 前缀匹配，且放宽到 30 条（shim/xnu 两条工作流都会产生 run）
+        for r in get(f"https://api.github.com/repos/{REPO}/actions/runs?per_page=30")["workflow_runs"]:
+            if r["head_sha"].startswith(sha):
                 run = r
                 break
         if run:
