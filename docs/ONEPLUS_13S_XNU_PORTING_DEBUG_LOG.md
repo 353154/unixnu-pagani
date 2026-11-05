@@ -1188,3 +1188,76 @@ void IOKitInitializeTime( void ) {
 **方法论**：OCR 把 `SWEET` 读成了 `MEET`，我差点按错误前缀去 `grep`，什么也找不到。修正方式是从产物内核 `strings` 反查真实字符串——`SWEET PRNG: HMAC-SHA256 registered` 一出现，前缀就确定了。**照片里的字符串一律先在内核里核一遍再用。**
 
 下一轮：`0094`（提交 `fcb0a59`）跳过 IORTC 等待，并在前后埋 `SWT1`（进入）/`SWT2`（跳过）/`SWT3`（calendar 前）/`SWT4`（calendar 后），每个都带 `mach_absolute_time` 读数。
+
+### 14.13 `0094` 实测：跨过 `IOKitInitializeTime`，一路推进到 `skywalk_init`（00:48 引导，提交 `fcb0a59`）
+
+**这是 M7 之后单轮推进最远的一次。** 屏幕实际序列（OCR 修正后；左边缘被裁，`SWT` 常被读成 `WTI`，`SWEET` 被读成 `WEET`）：
+
+```
+SWT1 iokit_time enter t=184037626        ← 疑似 OCR 把 0 读成 8，见下
+SWT2 rtc wait skipped                    ← 0094 的跳过生效
+SWT3 before calendar t=184039920
+SWT4 calendar done t=184041373
+bsd_init: calling vfsinit                ← IOKitInitializeTime 返回了
+IOResources: not registry member at registerService()
+strategy_register_subsystem_strings: set subsystem 0 strings
+calling mpo_policy_init for SWEET AMFI
+security policy loaded: SWEET built-in Mobile File Integrity (SWEET AMFI)
+SWEET AMFI: platform binary policy registered (0)
+calling mpo_policy_init for Sandbox
+security policy loaded: SWEET permissive sandbox stand-in (Sandbox)
+SWEET Sandbox: permissive policy registered (0)
+SWEET HFS: hfs-627.100.6 registered
+bsd_init: calling proc_uuid_policy_init()
+mcache: 1 CPU(s), 64 bytes CPU cache line size
+bsd_init: calling mbinit
+mbinit: done [64 MB total pool size, (42/21) split]
+bsd_init: calling audit_init
+bsd_init: calling knote_init
+bsd_init: calling eventhandler_init
+bsd_init: calling aio_init
+bsd_init: calling pshm_cache_init
+bsd_init: calling psem_cache_init
+bsd_init: calling nwk_wq_init
+bsd_init: calling dlil_init
+K: netagent is enabled by default for this platform
+NIL: running SUM6 self-tests ... PASSED
+dlli_init: All the created dlli kernel threads have been scheduled at least once. Proceeding.
+bsd_init: calling socketinit
+bsd_init: calling domaininit
+bsd_init: calling skywalk_init              ← 最后一条 bsd_init 日志
+KIO: skmem_region_init  seg_size 16384, md_seg_size 16384, drv_buf_seg_size 65536 [eff 65536], usr_buf_seg_size 16384
+```
+（之后屏幕底部只有彩色条纹，无更多文字）
+
+**结论一：`IOKitInitializeTime` 这一关彻底过了。** `SWT2` 出现 = 跳过 IORTC 等待生效；`SWT4` 出现 = `clock_initialize_calendar()` 正常返回；`calling vfsinit` 出现 = 函数已经回到 `bsd_init` 并继续往下走。
+
+**结论二：`0094` 一次性跨过 12 个子系统。** `vfsinit` → MAC 策略（AMFI / Sandbox / HFS）→ `proc_uuid_policy_init` → `mbinit` → `audit_init` → `knote_init` → `eventhandler_init` → `aio_init` → `pshm/psem` → `nwk_wq` → `dlil` → `socketinit` → `domaininit` → `skywalk_init`。此前从未走到过 `vfsinit`。
+
+**结论三：这同时坐实了 §14.12 的勘误。** `using 462 buffer headers` 出现在 `calling bsd_bufferinit` 之后、`calling IOKitInitializeTime` **之前**；而真正的 `mbinit: done [64 MB total pool size, (42/21) split]` 出现在 `IOKitInitializeTime` **之后**。我此前把前者当成 `mbinit` 的输出，顺序整个写反了，此处以实测为准。
+
+**结论四：时间读数。** `SWT3`→`SWT4` 差 1453，`SWT1` 若为 `184037626` 则到 `SWT3` 差 2294（单位 ns 量级，即微秒级）。说明 `clock_initialize_calendar()` 几乎不耗时，它不是死点。注意 `SWT1` 印刷值为 `184837626`，比 `SWT3` 还大——**这是不可能的**（`mach_absolute_time` 单调递增），所以判定为 OCR 把第二个 `0` 读成了 `8`。凡单次读数仅凭照片判读，一律先假定可能误读。
+
+**结论五：新死点在 `skywalk_init()` 内部。** 最后一条是 `skmem_region.c:374` 的 `SK_ERR`，其后的三步全部**没有任何输出**：
+
+```c
+TAILQ_INIT(&skmem_region_head);
+skmem_region_update_tc = thread_call_allocate_with_options(...);  // 失败会 panic，但没看到 panic
+sg_size = sizeof(struct sksegment);
+skmem_sg_cache = skmem_cache_create("sg", sg_size, ...);
+skmem_dispatch(skmem_region_update_tc, NULL, interval * NSEC_PER_SEC);  // 排一个延迟 thread call
+```
+
+三者中 `skmem_dispatch` 嫌疑最大：它走 `thread_call_enter_delayed`，需要定时器中断。但 **不能凭嫌疑下结论**——`SWT2` 证明我们跳过了那个 30 秒等待，所以"deadline 睡眠能否被唤醒"这件事**从头到尾没被验证过**。这是本轮留下的最大未知。
+
+**结论六：`mcache: 1 CPU(s)`** —— 仍然只认到一个核，与 §14.10 的 `SWP12 n=1` 一致。M8 的入口确认还是"补 CPU topology 上报"。
+
+**待查但暂不阻塞**：`mbinit` 与 `mbinit: done` 之间夹着
+```
+haltForSystemMapper
+backtrace 0xfffffff0076f2364 0xfffffff007a359bc 0xfffffff007411a20 0x0 0x0 0x0 0x0
+        can't perform kext scan: no kext summary
+```
+按 §2 末行铁律，屏幕行序不可靠，这几行有相当概率是上一轮残留像素；且系统随后继续跑完 `mbinit` 并推进了十几个子系统，说明没有真停机。**记录在案，不作为死点，也不要在下一轮当成新问题重新怀疑。**
+
+下一轮：`0095`（提交 `1a92e67`）在 `skmem_init` 的四个子步骤、`skmem_region_init` 的三条可疑语句、以及 `skywalk_init` 之后直到 `vfs_mountroot` 的每个节点都打了标记（`SWX1..SWX8`、`SWY2..SWY9`、`SWA1..SWA2`）。一次引导即可把死点缩到单条语句；若看到 `SWA2`，说明已到挂根门口。

@@ -95,7 +95,7 @@ flowchart TD
 | **M6** | 早期虚拟内存与控制台交接 | 🟡 **VM 侧全通 / console 未通** | Stage 20 达成、`kprintf` 真实日志上屏；但 console 接管卡在 `initialize_screen` 的 `ml_io_map_unmappable`（12.8MB 二次映射） |
 | **M7** | 核心调度器与 IOKit 框架启动 | ✅ **已达成 (2026-11-06 00:06)** | `kernel_bootstrap` 全程跑完并进入 `bsd_init()`；连破三关：zones 128GB 下溢、video console 未映射 `vbase`、`max_cpus` 闸门永不开 |
 | **M8** | 8 核 SMP PSCI 唤醒 | ⏳ 规划中 | 启动从核调度 |
-| **M9** | 根文件系统挂载 (Ramdisk / UFS) | 🔄 **当前攻坚** | `bsd_init` 已进入，下一步 `vfs_mountroot()` 需要 root ramdisk |
+| **M9** | 根文件系统挂载 (Ramdisk / UFS) | 🔄 **当前攻坚** | `bsd_init` 已越过 `IOKitInitializeTime`，连过 12 个子系统（`vfsinit` → MAC 策略 → `mbinit` → `audit`/`knote`/`aio` → `socketinit`/`domaininit`），停在 `skywalk_init()` 内；`0095` 正在定位到单条语句 |
 | **M10**| 用户态跨越 (PID 1 launchd / init) | ⏳ 规划中 | 进入 EL0 用户空间 |
 
 ---

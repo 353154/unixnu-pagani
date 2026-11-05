@@ -6,7 +6,7 @@
 > 项目：OnePlus 13s (`pagani` / SM8750 / Oryon 8 核) 移植 Apple XNU `xnu-8796.141.3`
 > 运行环境：Gunyah Hypervisor NS-EL1
 > 仓库：`~/unixnu-pagani`（GitHub `353154/unixnu-pagani`，main）
-> 最后更新：2026-11-06 00:42（`0093` 实测到 `bsd_init: calling IOKitInitializeTime`；根因是等一个不存在的 `IORTC`，`0094` 已下发；同时更正 `buffer headers` 归属错误）
+> 最后更新：2026-11-06 00:56（`0094` 实测跨过 `IOKitInitializeTime`，连过 12 个子系统后停在 `skywalk_init()`；`0095` 已下发。本轮另增 §3.0 可达性表、`tools/test_boot_gate.py`、`tools/refresh_status.py`）
 >
 > **交接时只需移交本文件一份**（见下方「移交清单」）。不要整份粘贴 DEBUG_LOG。
 >
@@ -40,14 +40,15 @@ ls xnu/patches/ | tail -5                            # 最近加了什么探针
 
 | 项 | 值 |
 | :--- | :--- |
-| 当前阶段 | **M7 已达成；M9 已开局（2026-11-06 00:20 实测）**：`bsd_init()` 进入并连续跑过 `kauth_init` → `process_name` → `kauth_cred_create` → `kmem_suballoc` → `bsd_bufferinit`（打出 `using 462 buffer headers`），停在 `calling IOKitInitializeTime` |
-| 最新内核提交 | `fcb0a59`（`0094` 跳过 IORTC 等待 + `SWT1..SWT4` 探针），**构建中** |
-| 最新构建 | `231550f`（`0093`）/ Run `61` success，已实测；`fcb0a59` 的 Run 待查 |
-| 最新引导 | `231550f` 00:20 引导（`0093` 实测）；台账 `out/boot_history.jsonl`，**同 sha 不再重复引导** |
-| 屏幕最后一行 | `bsd_init: calling IOKitInitializeTime` —— 之后没有任何 `calling vfsinit` |
-| 死点 | `IOKitInitializeTime()` 内部（`iokit/Kernel/IOStartIOKit.cpp:73`）：第一句 `waitForService(resourceMatching("IORTC"), 30s)`，本平台无 RTC 驱动，服务永不出现，`SLEEPNOTIFYTO` 的 deadline 睡眠不返回。**不是崩溃，是睡着了** |
-| 已确认根因（前四关） | ① `zones` 索取 128GB VA 致 kmem claims 下溢（`0089`）；② video console 用未映射的 `vinfo.v_baseaddr` 绘制（`0090`）；③ `kperf_init_early` → `ml_wait_max_cpus()` 永久睡眠，置位者 `ml_set_max_cpus()` 只被不存在的 IOKit CPU 驱动调用（`0092`）；④ `IOKitInitializeTime` 等不存在的 `IORTC`（`0094`，待验证） |
-| 下一步动作 | 读 `SWT1`~`SWT4`：`SWT2` 缺 = deadline 睡眠根本没醒（定时器中断有问题，比 RTC 更大）；四个都出现且随后有 `calling vfsinit` = 这一关已过，继续看 `bsd_init` 后续。再往后就是 `vfs_mountroot()` 找不到根设备，**准备 ramdisk 是正解，不是救火** |
+| 当前阶段 | **M9 推进中（2026-11-06 00:48 实测）**：`bsd_init()` 越过 `IOKitInitializeTime`，一口气跑过 `vfsinit` → MAC 策略（AMFI / Sandbox / HFS）→ `mbinit` → `audit/knote/eventhandler/aio/pshm/psem` → `nwk_wq/dlil/socketinit/domaininit`，停在 `skywalk_init()` 内部。**这是 M7 之后单轮推进最远的一次，跨过 12 个子系统** |
+| 最新内核提交 | `1a92e67`（`0095`：skywalk 内部 + 挂根全链路打点 `SWX1..8` / `SWY2..9` / `SWA1..2`），**构建中** |
+| 最新构建 | `fcb0a59`（`0094`）/ Run `62` success，**已实测**；`1a92e67` 的 Run 待查 |
+| 最新引导 | `fcb0a59` 00:48 引导（台账原记为 `boot_failed`，已按屏幕实证更正为 `booted`）；`1a92e67` 构建完将自动引导 |
+| 屏幕最后一行 | `skmem_region_init  seg_size 16384, md_seg_size 16384, drv_buf_seg_size 65536 [eff 65536], usr_buf_seg_size 16384`（`bsd/skywalk/mem/skmem_region.c:374` 的 `SK_ERR`），此后只有彩条、无任何文字 |
+| 死点 | `skywalk_init()` 内部、`skmem_region_init()` 的 `SK_ERR` 之后。三条候选，全都没有输出：`thread_call_allocate_with_options`（失败会 panic，但无 panic 输出）、`skmem_cache_create("sg")`、`skmem_dispatch`（排延迟 thread call，**需要定时器中断**）。`0095` 的 `SWX5..SWX8` 一次分开 |
+| 已确认根因（前四关） | ① `zones` 索取 128GB VA 致 kmem claims 下溢（`0089`）；② video console 用未映射的 `vinfo.v_baseaddr` 绘制（`0090`）；③ `kperf_init_early` → `ml_wait_max_cpus()` 永久睡眠，置位者只被不存在的 IOKit CPU 驱动调用（`0092`）；④ `IOKitInitializeTime` 等不存在的 `IORTC`（`0094`，**已验证通过**：`SWT2`/`SWT4` + `calling vfsinit` 全部出现） |
+| 下一步动作 | 读 `SWX1..SWX8`，**编号最大的即死点**。出现 `SWX4` = `skywalk_init` 已返回，继续看 `SWY2..`；出现 `SWA2` = 已到 `vfs_mountroot` 门口，**下一步必须准备 ramdisk，不是继续改代码** |
+| 台账快照 | 自动生成 11-06 00:56 · HEAD `1a92e67` · 最新 CI Run 63 `1a92e67` in_progress · 最近引导 `fcb0a59` 00:48:05 booted |
 
 ---
 
@@ -89,6 +90,9 @@ ls xnu/patches/ | tail -5                            # 最近加了什么探针
 | "claims 是某项 `kc_calculate_sz` 按物理内存算歪了" | §14.6 | **已推翻**。`zones` 的 128GB 是**编译期常量** `ZONE_MAP_VA_SIZE`（MacOSX 分支），根本没有运行时计算参与。误判原因：看到「13 项平均 10.8GB」就假设是计算错误，没先查注册点的尺寸来源 |
 | "`using 462 buffer headers` 是 `mbinit` 的输出，死点在 `mbinit` 之后" | §14.10 | **顺序写反了**。该行由 `bsd_bufferinit()`（`bsd_init.c:681`）→ `bufinit()`（`vfs_bio.c:2220`）打印；`mbinit()` 在 705 行，排在 `IOKitInitializeTime`(687) 和 `vfsinit`(691) **之后**。误判原因：日志宏被关掉时用"最后一行输出"直接对到了下一个调用，没去源码核打印点 |
 | "屏幕上的 `SWEET FB: ... presented as 1216x2640` 是本轮最新输出，所以卡在 FB" | 00:33 读屏 | **不成立**。它是 `AppleCLCD::start()` 的收尾日志（`0061` 补丁第 54 行，紧跟 `registerService()`），而 `start()` 只可能在 `bsd_init` **之前**的 IOKit 匹配阶段执行。出现在 `calling IOKitInitializeTime` 之后纯属环形缓冲残留。另外 OCR 把 `SWEET` 读成了 `MEET`，差点按错前缀 grep——**照片里的字符串先用产物内核 `strings` 核一遍** |
+| 「`fastboot boot` 返回空输出 = 引导失败」 | 00:48 台账 | **误判**。设备刚重枚举时 fastboot 可能已经把内核交出去、随即离开 fastboot 模式，命令没有任何回显。真判据是**设备还在不在 fastboot**：走了就说明内核接手了。`fcb0a59` 因此被误记为 `boot_failed`，实际跑得好好的。修法见 `tools/auto_boot_pipeline.py` 的 `sh_all()` 与 `boot_unconfirmed` |
+| 「`SWT1 t=184837626` 比 `SWT3 t=184039920` 还大，说明 `mach_absolute_time` 倒退 / 定时器异常」 | 00:48 读屏 | **OCR 误读**。`mach_absolute_time` 单调递增，不可能倒退。实际是 `184037626`，第二个 `0` 被读成 `8`。凡单个数字读数与单调性相矛盾，先怀疑读错，不要先怀疑内核 |
+| 「日志停在 `skmem_region_init` 的那行 `SK_ERR`，所以死点就在打印语句里」 | 00:51 读屏 | **位置对、归因错**。那行只是该函数里最后一条**有输出**的语句，其后还有三步（`thread_call_allocate`、`skmem_cache_create`、`skmem_dispatch`）本来就不打印。死点在它们之中，`0095` 的 `SWX5..SWX8` 才能分开 |
 
 另附事实约束（不是结论，是环境限制）：
 - 本机 `xnu-src` 是**残缺快照**（缺 `config/MASTER.arm64.sweet` 等），只能对 `osfmk/`、`pexpert/` 做 `git apply --check` dry-run，**无法完整本地试跑补丁序列**。
@@ -98,6 +102,23 @@ ls xnu/patches/ | tail -5                            # 最近加了什么探针
 ---
 
 ## 3. 当前进度与死点（真机实测，不必重查）
+
+### 3.0 可达性表（回退时看这张，别凭记忆）
+
+每一轮都在往前顶，但补丁之间会互相影响。**如果新提交反而比旧提交更早挂**，说明
+这一轮引入了回归，应当按这张表回退到"最远记录"，而不是在坏版本上继续修。
+
+| 提交 | 关键补丁 | 最远到达 | 判读依据（屏幕实证） |
+| :--- | :--- | :--- | :--- |
+| `36ce59d` | `0089` zones 降 24GB | `initialize_screen()` 内部 | 最后一行 `SWD07 gc_acquired` |
+| `651db40` | `0090` 跳过 video console | `mac_policy_initmach()` | `SWV1` + `SWV2` 出现，`SWV3` 无 |
+| `0df72ad` | `0091` SWP1..11 打点 | `kperf_init_early()` | `SWP11` 出现（尾巴全通） |
+| `f2d805e` | `0092` 放开 max_cpus | `bsd_init()` 内 `bsd_bufferinit` 后 | `SWV3` + `using 462 buffer headers` |
+| `231550f` | `0093` 打开 DEBUG_BSDINIT | `IOKitInitializeTime()` | `bsd_init: calling IOKitInitializeTime` |
+| `fcb0a59` | `0094` 跳过 IORTC 等待 | `skywalk_init()` 内 `skmem_region_init` 之后 | `SWT1..SWT4` + `calling vfsinit` + `calling skywalk_init` |
+| `1a92e67` | `0095` skywalk/挂根打点 | **待测**（`SWX1..8` / `SWY2..9` / `SWA1..2`） | — |
+
+**当前最远记录：`fcb0a59`。** 它一次性跨过 `vfsinit` → MAC 策略 → `mbinit` → `audit`/`knote`/`aio` → `socketinit`/`domaininit` 共十二章，停在 `skywalk_init()` 内部。任何回退都以它为准。
 
 ### 3.1 已经跑通的链路（`cc9b9d2`，Run `42042712579` 实测）
 
@@ -229,60 +250,81 @@ python3 ~/unixnu-pagani/tools/auto_boot_pipeline.py --sha $(git rev-parse --shor
 
 ## 7. 下一步该做什么（精确到文件）
 
-### 7.1 当前这一轮：验证 `0094` 是否把 `IOKitInitializeTime` 推过去
+### 7.1 当前这一轮：验证 `0095` 把死点缩到单条语句
 
-`0093` 已实测到位：`bsd_init` 内部日志全部出现，最后一条是 `calling IOKitInitializeTime`，此后没有 `calling vfsinit`。
+`0094` 已实测通过，不要再回头验证 `SWT`：`SWT1..SWT4` 全部出现，其后打出 `calling vfsinit`，再连过 12 个子系统，停在 `skywalk_init()` 内部、`skmem_region_init()` 的 `SK_ERR` 之后。
 
-`0094`（`fcb0a59`，`iokit/Kernel/IOStartIOKit.cpp`）跳过 `waitForService(resourceMatching("IORTC"), 30s)`——本平台没有 RTC 驱动，这个服务永远不会出现——并埋了四个带时间戳的探针：
+`0095`（`1a92e67`）在这一段连打 18 个标记。**判读规则仍然只有一条：屏幕上编号最大的那个就是死点。**
 
-| 标记 | 位置 | 出现代表 |
+| 标记 | 位置 | 出现即证明 |
 | :--- | :--- | :--- |
-| `SWT1` | 函数入口 | 进了 `IOKitInitializeTime` |
-| `SWT2` | 跳过 RTC 等待之后 | 没有卡在服务等待上 |
-| `SWT3` | `clock_initialize_calendar()` 之前 | 走到了日历初始化 |
-| `SWT4` | `clock_initialize_calendar()` 之后 | 这一关整体通过 |
+| `SWX1` | `skmem_cache_pre_init()` 之后 | 第一步过 |
+| `SWX2` | `skmem_region_init()` 之后 | **region_init 整个返回了** |
+| `SWX3` | `skmem_cache_init()` 之后 | cache_init 过 |
+| `SWX4` | `pp_init()` 之后 | `skmem_init` 全通 |
+| `SWX5` | `TAILQ_INIT(&skmem_region_head)` 之后 | 进入了可疑区 |
+| `SWX6` | `thread_call_allocate_with_options()` 成功之后 | 线程调用分配成功 |
+| `SWX7` | `skmem_cache_create("sg", ...)` 之后 | sg cache 建成 |
+| `SWX8` | `skmem_dispatch(...)` 之后 | **`skmem_region_init()` 跑到底** |
+| `SWY2` | `(void) skywalk_init();` 之后 | **`skywalk_init` 返回了** |
+| `SWY3`/`SWY4` | `necp_init` / `netagent_init` 之后 | NECP、netagent 过 |
+| `SWY5` | `memorystatus_init()` 之后 | 内存状态机过 |
+| `SWY6` | `sysctl_mib_init()` 之后 | sysctl MIB 过 |
+| `SWY7` | `bsd_autoconf()` 之后 | 自动配置过 |
+| `SWY8` | `net_init_run()` 之后 | 网络初始化回调跑完 |
+| `SWY9` | `inittodr(0)` 之后 | 时间设定过 |
+| `SWA1` | `setconf()` 之后 | **已选定根设备** |
+| `SWA2` | `vfs_mountroot()` 调用前 | **已到挂根门口** |
 
-判读按最大编号走：
+**按结果分支（左列命中即为结论）：**
 
-- **只有 `SWT1`、无 `SWT2`** → 说明 RTC 那段根本不是死因（或者补丁没进内核），要回去看 `MARK SWT2` 是否为负。
-- **`SWT1`+`SWT2`、无 `SWT3`** → 两者之间有别的等待，需在中间再二分。
-- **`SWT1`~`SWT4` 全有、随后出现 `calling vfsinit`** → 这一关通过，继续往下看。
+| 现象 | 结论与下一步 |
+| :--- | :--- |
+| `SWX5` 有、`SWX6` 无 | `thread_call_allocate_with_options()` 挂住。查 thread_call 子系统是否已初始化（`thread_call_initialize` 在 `kernel_bootstrap` 里，若有条件编译差异需核对） |
+| `SWX6` 有、`SWX7` 无 | `skmem_cache_create("sg")` 挂住。查 `sg` 这个 skmem_cache 的 zone/segment 分配路径 |
+| `SWX7` 有、`SWX8` 无 | `skmem_dispatch()` 挂住。它是 `thread_call_enter_delayed`，**说明延迟定时器排不进去 —— 也就是说"deadline 唤醒"确实有问题**，这会同时解释 `0094` 为什么只能靠跳过 RTC 绕开。优先级最高的一类根因 |
+| `SWX8` 有、`SWX2`/`SWX3` 无 | `skmem_region_init` 返回或 `skmem_cache_init` 内部挂。二分 `skmem_cache_init` |
+| `SWX4` 有、`SWY2` 无 | `skywalk_init()` 返回路径挂（`skmem_sys_region_init` 等后续步骤） |
+| `SWA2` 出现 | **已到 `vfs_mountroot`。这一关的性质变了：不是 bug，是缺 ramdisk。立刻转 M9 准备根文件系统，不要再改内核代码** |
+| 一个 `SWX` 都没有 | `0095` 没进内核，看流水线 `MARK SWX1` 是否为负 |
+| 卡在 `SWA1` 与 `SWA2` 之间 | `setconf()` 内选根设备挂住，查 `bsd_autoconf` 注册的 `mountroot` |
 
-`bsd_init()` 的关键序列（行号对 `bsd/kern/bsd_init.c`）：
+`bsd_init()` 关键序列（行号对 `bsd/kern/bsd_init.c`，**状态截至 `fcb0a59` 实测**）：
 
 | 行 | 调用 | 状态 |
 | :--- | :--- | :--- |
-| 570 | `mac_policy_initbsd()` | ✅ 已过（`MAC Framework successfully initialized`） |
-| 681 | `bsd_bufferinit()` | ✅ 已过（内部 `bufinit()` 打出 `using 462 buffer headers`） |
-| 687 | `IOKitInitializeTime()` | 🔴 **当前死点**：等不存在的 `IORTC` |
-| 691 | `vfsinit()` | ❓ |
-| 705 | `mbinit()` | ❓ |
-| 713 | `audit_init()` | ❓ |
-| 720 | `knote_init()` | ❓ |
-| 728 | `aio_init()` | ❓ |
-| 856 | `inittodr(0)` | ❓ |
-| 868 | `setconf()` | ❓ 选根设备 |
-| 870 | `vfs_mountroot()` | ❓ 挂根，失败会进 `while (TRUE)` 无限重试 |
+| 570 | `mac_policy_initbsd()` | ✅ `MAC Framework successfully initialized` |
+| 681 | `bsd_bufferinit()` | ✅ `using 462 buffer headers` |
+| 687 | `IOKitInitializeTime()` | ✅ `SWT1..SWT4`（`0094` 已解） |
+| 691 | `vfsinit()` | ✅ AMFI / Sandbox / HFS 全注册 |
+| 705 | `mbinit()` | ✅ `mbinit: done [64 MB total pool size]` |
+| 713–745 | `audit_init` → `knote_init` → `eventhandler_init` → `aio_init` → `pshm/psem` → `nwk_wq` → `dlil_init` | ✅ 全部出现 |
+| 749–752 | `socketinit()` / `domaininit()` | ✅ 全部出现 |
+| 760 | `skywalk_init()` | 🔴 **当前死点**：`skmem_region_init()` 的 `SK_ERR` 之后 |
+| 765–789 | `necp_init` / `netagent_init` / `memorystatus*` / `sysctl_mib_init` / `bsd_autoconf` | ❓ `0095` 的 `SWY*` 覆盖 |
+| 856 | `inittodr(0)` | ❓ `SWY9` |
+| 868 | `setconf()` | ❓ `SWA1` 选根设备 |
+| 870 | `vfs_mountroot()` | ❓ `SWA2`，失败进 `while (TRUE)` 无限重试 |
 
-> ⚠️ 顺序易错点：`IOKitInitializeTime`（687）在 `vfsinit`（691）**之前**，而 `mbinit`（705）在两者**之后**。`using 462 buffer headers` 是 `bsd_bufferinit` → `bufinit()`（`bsd/vfs/vfs_bio.c:2220`）打印的，**不是** `mbinit`。§14.10 里那句写错了，已插勘误。
+> ⚠️ 唯一容易搞错的地方：`using 462 buffer headers`（`bsd_bufferinit`）在 `IOKitInitializeTime` **之前**，真正的 `mbinit: done` 在其**之后**。§14.12 曾把两者弄反，§14.13 已用实测纠正。
 
-### 7.2 按结果分支
+### 7.2 通过之后：先备 ramdisk，再谈 8 核
 
-- **`SWT4` 出现且随后打 `calling vfsinit`** → `IOKitInitializeTime` 过关。继续跟 `bsd_init` 往下，下一站大概率是 `vfs_mountroot()` 找不到根设备。
-- **卡在 `vfs_mountroot`** → 预期中最可能的结果。没有根设备，它会清空 `rootdevice` 再重试并打印错误。**正解是提供 ramdisk，不是改代码绕过**——这不是 bug，是缺少运行时依赖。
-- **卡在 `mbinit` 与 `vfs_mountroot` 之间的某个 init** → 逐个看该函数是否依赖不存在的驱动/资源（`audit_init` 依赖 kauth、`knote_init` 依赖 kqueue zone、`aio_init` 依赖 workqueue）。
-- **完全看不到 `bsd_init: calling`** → `0093` 没进内核，看流水线 `MARK bsd_init: calling` 是否为负。
+`0095` 一旦打出 `SWA2`，主线就从「修内核」切换到「备根文件系统」。这两件事的
+排查方式完全不同：前者读源码定位语句，后者是准备一个交付物。
 
+**M9 的第一件事不是写代码，是准备 root ramdisk**：`vfs_mountroot()` 失败会清空
+`rootdevice` 后 `while (TRUE)` 重试，屏幕上会不断刷 `cannot mount root, errno = N`。
+看起来像新死点，其实是没有可挂的东西。要么用 boot_args 的 `-md` 注入内存根盘，
+要么从 UFS 切一个最小分区。**这一步必须在撞上之前就开始准备，不能等它挂住再救。**
 
-### 7.3 通过之后
-
-`bsd_init` 挂根（M9，需要 ramdisk/UFS）→ 8 核 PSCI（M8）→ launchd（M10）。
+后续里程碑：8 核 PSCI（M8）→ launchd 及 libSystem（M10）。
 
 **M8 的入手点已经测出来了**：`SWP12` 打出 `wait_max_cpus n=1`，说明 `machine_info.max_cpus` 现在是 **1**——PE 只枚举了一个 CPU。这不是配置问题，是没有 `AppleARMSMP` 平台驱动来上报 CPU topology。做 M8 时从这里开始，而不是从 PSCI 汇编开始。
 
 **同时值得评估**：本构建为什么走 `XNU_PLATFORM_MacOSX` 分支。`0089` 只打了一个宏补丁，没改平台判定；若后续再遇到「Mac 有、iOS 没有」的常量差异（zalloc / IOKit / 驱动加载路径上还有若干处），应整体切到 iOS 平台配置。**但那是一次大改，必须单独一轮、单独归因。**
 
-### 7.4 顺手该修的（不阻塞主线）
+### 7.3 顺手该修的（不阻塞主线）
 
 1. `SWT in X.2147483647` 说明某条 `__startup_func` 描述的 `rank` 未初始化（`INT_MAX` 哨兵）。
 2. `SWT` 输出淹了半屏，建议进入 `kernel_bootstrap` 后关掉，恢复读屏信噪比。
