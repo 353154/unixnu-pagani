@@ -105,7 +105,7 @@ index d89b0f1..d0c710d 100644
  
  	flush_mmu_tlb();
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index ccbb188..143ddb0 100644
+index ccbb188..361f5dc 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
 @@ -212,6 +212,62 @@ LEXT(ResetHandlerData)
@@ -369,7 +369,7 @@ index ccbb188..143ddb0 100644
  
  #if !VMAPPLE && !defined(SWEET)
  	MOV64   x1, SCTLR_EL1_DEFAULT
-@@ -794,6 +998,65 @@ common_start:
+@@ -794,6 +998,71 @@ common_start:
  	add		x0, x20, x22
  	sub		x0, x0, x23
  
@@ -427,15 +427,21 @@ index ccbb188..143ddb0 100644
 +	mov		x7, x10
 +	MOV64	x1, (0xfc800000 + 1080 * 4864 + 100 * 4)
 +	bl		Lsweet_exc_bits
-+	/* Restore arm_init target (lr) and boot_args KVA (x0) and jump to arm_init */
-+	mov		lr, x27
++
++	/*
++	 * Jump to KVA probe trampoline: converts PC to KVA without touching C stack!
++	 */
++	adrp	lr, EXT(sweet_kva_probe)@page
++	add		lr, lr, EXT(sweet_kva_probe)@pageoff
++	add		lr, lr, x22
++	sub		lr, lr, x23
 +	mov		x0, x28
 +#endif
 +
  #if KASAN
  	mov	x20, x0
  	mov	x21, lr
-@@ -867,6 +1130,105 @@ arm_init_tramp:
+@@ -867,6 +1136,159 @@ arm_init_tramp:
  	/* Return to arm_init() */
  	ret
  
@@ -536,6 +542,60 @@ index ccbb188..143ddb0 100644
 +	subs	x8, x8, #1
 +	b.pl	201b
 +	ret
++
++	.align 4
++	.globl EXT(sweet_kva_probe)
++LEXT(sweet_kva_probe)
++	/*
++	 * CP6A: We are now running via TTBR1 in KVA space!
++	 * Paint a huge 100x100 bright cyan block at row 520, col 300.
++	 * Absolutely NO stack operations, NO memory allocations, purely register-based!
++	 */
++	MOV64	x1, (0xfc800000 + 520 * 4864 + 300 * 4)
++	MOV64	x2, 0xff00ffff		// Bright Cyan (0x00FFFF)
++	mov		x3, #100
++301:
++	mov		x5, #100
++	mov		x6, x1
++302:
++	str		w2, [x6], #4
++	subs	x5, x5, #1
++	b.ne	302b
++	add		x1, x1, #4864
++	subs	x3, x3, #1
++	b.ne	301b
++	dsb		sy
++
++	/*
++	 * CP6B: Now test stack write via KVA!
++	 * SP was set to intstack_top (0xfffffe00080b4000).
++	 * Let's test a simple push and pop.
++	 */
++	sub		sp, sp, #32
++	str		x28, [sp]
++	ldr		x3, [sp]
++	add		sp, sp, #32
++	/* If stack write survived, paint a bright pink 60x60 block right next to it! */
++	MOV64	x1, (0xfc800000 + 520 * 4864 + 420 * 4)
++	MOV64	x2, 0xffff00ff		// Bright Magenta (0xFF00FF)
++	mov		x3, #60
++303:
++	mov		x5, #60
++	mov		x6, x1
++304:
++	str		w2, [x6], #4
++	subs	x5, x5, #1
++	b.ne	304b
++	add		x1, x1, #4864
++	subs	x3, x3, #1
++	b.ne	303b
++	dsb		sy
++
++	/* Now proceed to C arm_init */
++	mov		x0, x28
++	adrp	x30, EXT(arm_init)@page
++	add		x30, x30, EXT(arm_init)@pageoff
++	br		x30
 +#endif /* SWEET */
 +
  //#include	"globals_asm.h"
