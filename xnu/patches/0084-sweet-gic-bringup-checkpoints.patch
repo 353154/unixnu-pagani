@@ -1,0 +1,133 @@
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -126,12 +126,18 @@
+ 		uint64_t const gicr_base_prop = ((uint64_t const *) prop)[2];
+ 		uint64_t const gicr_size_prop = ((uint64_t const *) prop)[3];
+ 
++		kprintf("SWC01 soc=%lx d_off=%llx d_sz=%llx r_off=%llx r_sz=%llx\n",
++		    (unsigned long)soc_base_phys, (unsigned long long)gicd_base_prop,
++		    (unsigned long long)gicd_size_prop, (unsigned long long)gicr_base_prop,
++		    (unsigned long long)gicr_size_prop);
++
+ 		// Find GICD base address
+ 		gicd_base = ml_io_map(soc_base_phys + gicd_base_prop, gicd_size_prop);
+ 
+ 		if (!gicd_base) {
+ 			panic("%s: cannot map GICD region", __func__);
+ 		}
++		kprintf("SWC02 gicd_va=%lx\n", (unsigned long)gicd_base);
+ 
+ 		// Find GICR base address
+ 		gicr_base = ml_io_map(soc_base_phys + gicr_base_prop, gicr_size_prop);
+@@ -139,15 +145,19 @@
+ 		if (!gicr_base) {
+ 			panic("%s: cannot map GICR region", __func__);
+ 		}
++		kprintf("SWC03 gicr_va=%lx\n", (unsigned long)gicr_base);
+ 
+ 		gicr_size = gicr_size_prop;
+ 	}
+ 
+ 	// Find the redistributor for this processor
+ 	vm_offset_t gicr_pe_base = find_gicr_pe_base();
++	kprintf("SWC04 gicr_pe=%lx size=%llx\n", (unsigned long)gicr_pe_base,
++	    (unsigned long long)gicr_size);
+ 
+ 	// Mark this PE to be awake
+ 	uint32_t gicr_waker = gicr_read32(GICR_WAKER);
++	kprintf("SWC05 waker=%x\n", gicr_waker);
+ 	if (gicr_waker & GICR_WAKER_CHILDRENASLEEP) {
+ 		gicr_waker &= ~GICR_WAKER_PROCESSORSLEEP;
+ 
+@@ -163,6 +173,7 @@
+ 			}
+ 		}
+ 	}
++	kprintf("SWC06 awake\n");
+ 
+ #if defined(SWEET)
+ 	/*
+@@ -176,6 +187,7 @@
+ 		gicr_write32(GICR_IPRIORITYR0 + i, 0xA0A0A0A0);
+ 	}
+ 	gicr_write32(GICR_ISENABLER0, (1U << sweet_vtimer_intid) | (1U << SWEET_IPI_SGI));
++	kprintf("SWC07 ppi_enabled\n");
+ #else
+ 	// Configure timers and legacy FIQ to be group 0
+ 	gicr_write32(GICR_IGROUPR0, 0x81FFFFFF);
+@@ -185,7 +197,9 @@
+ #endif /* SWEET */
+ 
+ 	// Enable system register access
++	kprintf("SWC08 sre_read\n");
+ 	uint64_t icc_sre = __builtin_arm_rsr64("ICC_SRE_EL1");
++	kprintf("SWC09 sre=%llx\n", (unsigned long long)icc_sre);
+ 	icc_sre |= ICC_SRE_SRE;
+ 	__builtin_arm_wsr64("ICC_SRE_EL1", icc_sre);
+ 	__builtin_arm_isb(ISB_SY);
+@@ -206,13 +220,18 @@
+ #if defined(SWEET)
+ 	// ABL leaves only ARE_NS set; Linux writes ARE_NS | EnableGrp1A | EnableGrp1
+ 	uint32_t gicd_ctlr = gicd_read32(GICD_CTLR);
++	kprintf("SWC10 gicd_ctlr_in=%x\n", gicd_ctlr);
+ 	gicd_ctlr |= GICD_CTLR_ARE_NS | GICD_CTLR_ENABLEGRP1A | GICD_CTLR_ENABLEGRP1;
+ 	gicd_write32(GICD_CTLR, gicd_ctlr);
+-	while (gicd_read32(GICD_CTLR) & GICD_CTLR_RWP) {
+-		;
++	for (int swc_rwp = 0; swc_rwp < 200000; swc_rwp++) {
++		if (!(gicd_read32(GICD_CTLR) & GICD_CTLR_RWP)) {
++			break;
++		}
+ 	}
++	kprintf("SWC11 gicd_ctlr_out=%x\n", gicd_read32(GICD_CTLR));
+ 	__builtin_arm_wsr64("ICC_IGRPEN1_EL1", 1);
+ 	__builtin_arm_isb(ISB_SY);
++	kprintf("SWC12 grp1_enabled\n");
+ #else
+ 	// Enable the forwarding of the vtimer interrupt
+ 	uint32_t gicd_ctlr = gicd_read32(GICD_CTLR);
+@@ -221,6 +240,7 @@
+ 	__builtin_arm_wsr64("ICC_IGRPEN0_EL1", 1);
+ 	__builtin_arm_isb(ISB_SY);
+ #endif /* SWEET */
++	kprintf("SWC13 pe_init_fiq done\n");
+ }
+ #else
+ void
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -476,6 +476,7 @@
+ void
+ machine_startup(__unused boot_args * args)
+ {
++	kprintf("SWC30 machine_startup\n");
+ #if defined(HAS_IPI) && (DEVELOPMENT || DEBUG)
+ 	if (!PE_parse_boot_argn("fastipi", &gFastIPI, sizeof(gFastIPI))) {
+ 		gFastIPI = 1;
+@@ -483,12 +484,15 @@
+ #endif /* defined(HAS_IPI) && (DEVELOPMENT || DEBUG)*/
+ 
+ 
++	kprintf("SWC31 machine_conf in\n");
+ 	machine_conf();
++	kprintf("SWC32 machine_conf done\n");
+ 
+ 
+ 	/*
+ 	 * Kick off the kernel bootstrap.
+ 	 */
++	kprintf("SWC33 kernel_bootstrap in\n");
+ 	kernel_bootstrap();
+ 	/* NOTREACHED */
+ }
+@@ -2265,8 +2269,10 @@
+ fiq_context_init(boolean_t enable_fiq __unused)
+ {
+ 	/* Interrupts still disabled. */
++	kprintf("SWC20 fiq_ctx in\n");
+ 	assert(ml_get_interrupts_enabled() == FALSE);
+ 	_enable_virtual_timer();
++	kprintf("SWC21 fiq_ctx out\n");
+ }
+ 
+ void
