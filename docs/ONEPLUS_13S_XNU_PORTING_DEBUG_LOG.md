@@ -1261,3 +1261,24 @@ backtrace 0xfffffff0076f2364 0xfffffff007a359bc 0xfffffff007411a20 0x0 0x0 0x0 0
 按 §2 末行铁律，屏幕行序不可靠，这几行有相当概率是上一轮残留像素；且系统随后继续跑完 `mbinit` 并推进了十几个子系统，说明没有真停机。**记录在案，不作为死点，也不要在下一轮当成新问题重新怀疑。**
 
 下一轮：`0095`（提交 `1a92e67`）在 `skmem_init` 的四个子步骤、`skmem_region_init` 的三条可疑语句、以及 `skywalk_init` 之后直到 `vfs_mountroot` 的每个节点都打了标记（`SWX1..SWX8`、`SWY2..SWY9`、`SWA1..SWA2`）。一次引导即可把死点缩到单条语句；若看到 `SWA2`，说明已到挂根门口。
+
+### 14.14 目标对齐：目标是引导 iOS，不是"自绘一个界面"（2026-11-06 01:00）
+
+用户明确指出最终目标是**引导 iOS**。`README.md` 阶段 4 本来就写着 "iOS Userland Extraction: iPhone X iOS 16.7.16 (20H392)"，`userland/` 下也确实躺着 15 GB 的 `iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw` 与 `rootfs_rw.dmg`。也就是说 §14.13 之后我把 M11 定义成"用户态程序 mmap 帧缓冲自绘界面"，是把交付目标降级成了可达性妥协——**该定义作废**，只在"验证 exec + mmap 通"这一层保留为手段。
+
+**本轮顺带查实的一条硬事实（会改变挂根方案）**：
+
+```
+hdiutil pmap userland/rootfs_rw.dmg
+  1 Apple_APFS   起始 34   长度 11005952 扇区（≈5.6 GB）
+hdiutil imageinfo → Format: UDRW, GUID 分区表
+userland/mnt → 空（尚未解包）
+```
+
+开源 XNU 树内只有 `bsd/hfs`，**没有 APFS**；`apfs` 在 `xnu-8796` 里是闭源 kext，只存在于 Apple 的 kernelcache。因此 M9 的"挂根"不是准备一个 ramdisk 就完事，而是必须先选边（详见 `XNU_HANDOFF_PROMPT.md` §7.0）：
+
+- **A** 把 iOS rootfs 文件搬进 HFS+ 镜像，继续用开源 XNU 挂载 —— 语义可控，但不是原生 iOS 根盘；
+- **B** 直接引导 Apple 的 `kernelcache` —— APFS/AMFI/dyld/launchd 全是真的，但要把 Qualcomm ADT 伪造成苹果设备树，且 DCP/SEP/AOP 驱动会失败；
+- **C** 先 A 打通 exec，再切 B。
+
+同时把 iOS 目标拆成 L1（iOS 平台语义的内核）/ L2（exec 一个 iOS 二进制）/ L3（launchd）/ L4（SpringBoard 上屏），并如实标注 **L4 受 DCP + Metal 阻塞**：SpringBoard 自 iOS 10 起只走 Metal，Adreno 830 在 XNU 内没有 GPU 驱动也没有显示控制器驱动。L1–L3 属工程问题，L4 属能力缺口，两者不能混为一谈。

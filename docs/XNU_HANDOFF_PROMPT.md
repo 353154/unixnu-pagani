@@ -40,6 +40,7 @@ ls xnu/patches/ | tail -5                            # 最近加了什么探针
 
 | 项 | 值 |
 | :--- | :--- |
+| **最终目标** | **在这台手机上引导 iOS 16 用户态**（iPhone X `iPhone10,3` / iOS 16.7.16 `20H392`，根盘已备于 `userland/rootfs_rw.dmg`）。**不是**"做个自绘界面"——任何把目标降级为"能看到点东西"的方案都不算达成。分层见 §7.0 |
 | 当前阶段 | **M9 推进中（2026-11-06 00:48 实测）**：`bsd_init()` 越过 `IOKitInitializeTime`，一口气跑过 `vfsinit` → MAC 策略（AMFI / Sandbox / HFS）→ `mbinit` → `audit/knote/eventhandler/aio/pshm/psem` → `nwk_wq/dlil/socketinit/domaininit`，停在 `skywalk_init()` 内部。**这是 M7 之后单轮推进最远的一次，跨过 12 个子系统** |
 | 最新内核提交 | `1a92e67`（`0095`：skywalk 内部 + 挂根全链路打点 `SWX1..8` / `SWY2..9` / `SWA1..2`），**构建中** |
 | 最新构建 | `fcb0a59`（`0094`）/ Run `62` success，**已实测**；`1a92e67` 的 Run 待查 |
@@ -249,6 +250,36 @@ python3 ~/unixnu-pagani/tools/auto_boot_pipeline.py --sha $(git rev-parse --shor
 ---
 
 ## 7. 下一步该做什么（精确到文件）
+
+### 7.0 最终目标是 iOS 16 用户态——先把分层和 APFS 岔路定死
+
+> 2026-11-06 01:00 用户明确：**目标是引导 iOS。** 上一轮曾把 M11 定义成"用户态自绘帧缓冲界面"，那是把目标降级成可达性妥协，**作废**。自绘帧缓冲只保留为 M11 的验证手段（证明 exec + `mmap` + 帧缓冲通），**不是交付目标**。
+
+**已实测的交付物现状**：`userland/rootfs_rw.dmg` 为 UDRW / GPT，唯一分区 `Apple_APFS`，起始扇区 34、长度 11,005,952 扇区 ≈ 5.6 GB；`userland/mnt` 目前是空的，尚未解包。
+
+**硬事实：开源 XNU 树内只有 HFS+（`bsd/hfs`），没有 APFS。** `apfs` 在 `xnu-8796` 里是闭源 kext，只存在于 Apple 的 kernelcache。所以「挂根」不是造个 ramdisk 就能糊过去的，必须先选边：
+
+| 路线 | 做法 | 能拿到 | 代价 |
+| :--- | :--- | :--- | :--- |
+| **A 换根盘** | 把 iOS rootfs 的文件搬进 HFS+ 镜像，开源 XNU 挂它 | exec / launchd 链路可验证，语义完全可控 | 不是"原生 iOS 根盘"，APFS 快照与加密全丢 |
+| **B 跑 Apple kernelcache** | 直接引导 Apple 自己的 iOS 内核 | APFS / AMFI / dyld / launchd 全是真的 | 内核按苹果设备树写死；要把 Qualcomm ADT 伪造成苹果节点，DCP/SEP/AOP 驱动会失败 |
+| **C 先 A 后 B** | A 先打通 exec，再切 B | 风险分段 | 两套引导打包都要维护 |
+
+**分层目标（L4 先把话说清楚）**：
+
+| 层 | 内容 | 判定标志 | 状态 |
+| :--- | :--- | :--- | :--- |
+| **L1** | 内核按 **iOS 平台语义**起来：切 `XNU_PLATFORM_EMBEDDED`，`boot_args` / ADT 对齐 iOS 期望 | 走到 `vfs_mountroot` 且不再走 MacOSX 分支 | 未开始；§7.2 里"值得评估"升级为**必需** |
+| **L2** | 挂 iOS ramdisk，exec 一个 iOS 用户态二进制（`/bin/sh`，arm64e） | 屏幕上出现该二进制自己的输出 | 阻塞于 A/B 岔路 |
+| **L3** | `launchd` 跑起来：dyld shared cache 映射、Mach bootstrap、AMFI / trust cache 放行 | `launchd` 打出第一行 | 需要 L2 稳定 |
+| **L4** | SpringBoard 上屏 | 看见 iOS 锁屏 | **受 DCP + Metal 阻塞** |
+
+L4 的阻塞性质要说死：SpringBoard 自 iOS 10 起只走 Metal 渲染，而 Adreno 830 在 XNU 内既无 GPU 驱动、也无 DCP 显示控制器驱动。**L1–L3 是工程问题，靠轮次能推进；L4 是能力缺口，不是工期问题。** 对外不要说"快能进 iOS 桌面了"。
+
+L2/L3 的两个前置，现在就该并行准备，别等挂根那天：
+
+1. 解包 `rootfs_rw.dmg`，确认 `sbin/launchd`、`System/Library/dyld/dyld_shared_cache_arm64e` 的实际形态与签名要求；
+2. `arm64e` 与 PAC：Oryon 支持 ARMv8.3 PAC，指令本身能执行；但 iOS 的 `__AUTH` 段与指针签名依赖内核 `pmap` 和 AMFI 配置，需确认本构建里 `ptrauth` 一组编译选项是开着的、trust cache 路径能放行未签名镜像。
 
 ### 7.1 当前这一轮：验证 `0095` 把死点缩到单条语句
 
