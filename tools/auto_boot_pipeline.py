@@ -21,7 +21,11 @@ SERIAL = os.environ.get("PAGANI_SERIAL", "3B1F67EA9BBUHK76")
 
 # 必须存在于产物内核中的标记串（缺失 => 对应补丁没生效）
 REQUIRED_MARKS = [b"SWD00", b"SWE00", b"SWC01",
-                  b"kernel framebuffer VA live", b"early I/O page tables ready"]
+                  b"kernel framebuffer VA live", b"early I/O page tables ready",
+                  # 0087 kmem 空间探针：比上面几条更关键——它决定本轮能否读出 kernel_map 边界
+                  b"SWK0", b"SWK1", b"SWK2", b"SWK3",
+                  # 0012：补丁被静默跳过数轮才导致的长期误判，必须每次校验
+                  b"SWEET EARLY 31"]
 
 
 def token():
@@ -66,6 +70,13 @@ def main():
     sha = sys.argv[sys.argv.index("--sha") + 1] if "--sha" in sys.argv else \
         sh(f"git -C {ROOT} rev-parse HEAD")
     print("HEAD", sha[:7], flush=True)
+
+    # 本轮新增的探针不必改代码：--require "SWK0,SWK1"
+    if "--require" in sys.argv:
+        for m in sys.argv[sys.argv.index("--require") + 1].split(","):
+            if m.strip():
+                REQUIRED_MARKS.append(m.strip().encode())
+        print("EXTRA MARKS", [m.decode() for m in REQUIRED_MARKS[-3:]], flush=True)
 
     run = None
     for _ in range(30):
