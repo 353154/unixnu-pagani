@@ -480,7 +480,33 @@ v4（`23e7859`）在两处补标记（x=180 深青 = isb 存活，x=220 深品�
 3. 将 KVA 数据读取探针（`0xfffffe000748b488`）移入 `common_start`，成功存活即亮 660 行 60×60 翠绿大块；
 4. 随后 `ret` 直奔 `arm_init`，跨越汇编/C 边界，点亮 CP6 橙色方块与早期控制台。
 
-### 7.20 v14 决战冲刺：解密 v13 硬件读数、修正 VBAR_EL1 与 Shareability、直通 arm_init (2026-11-05 14:30)
+### 7.21 v15 终极逆转：撤销 0083 假补丁，恢复 ARM 标准 TG1=1 (16KB) 粒度编码 (2026-11-05 14:45)
+
+**震！惊！世！界！的！真！相！**：
+查阅 ARMv8-A Architecture Reference Manual (ARM DDI 0487) 官方权威规范：
+对于 `TCR_EL1` 的 `TG1` 字段（Bits [31:30]）：
+- `0b01` = **16KB granule**！
+- `0b10` = **4KB granule**！
+- `0b11` = **64KB granule**！
+- `0b00` = Reserved！
+
+对于 `TG0` 字段（Bits [15:14]）：
+- `0b00` = 4KB granule！
+- `0b01` = 64KB granule！
+- `0b10` = **16KB granule**！
+
+**苹果原版 XNU 的宏定义 `proc_reg.h`**：
+`#define TCR_TG1_GRANULE_16KB (1ULL << 30)`
+苹果原版写的是 `1ULL << 30`（`0b01` = 16KB），**原本就是 100% 标准的 ARM 规范！**
+此前补丁 0083 误以为 TG0 和 TG1 编码对称（以为 16KB 都要写 2），误将 TG1 强行改为 `2ULL << 30`（`0b10`）！
+**这直接将 Oryon 硬件的 TTBR1 高半区强制切换到了 4KB 粒度！**
+4KB 的硬件 Translation Table Walker 在我们按 16KB 建立的页表上寻址，所有的层级索引、步进、偏移全数错位，导致从 v1 到 v14 所有经过 TTBR1 的访问（无论是指令取指还是数据加载）全部瞬间暴毙！
+
+**v15 修正**：
+1. **彻底删除 0083 补丁**，恢复 ARM 官方标准 `TG1 = 0b01` (16KB)；
+2. 实读预期：Row 1 的 `TCR_EL1` 将从 `0xa511a511` 变为 `0x6511a511`；
+3. Oryon 硬件将真正以 16KB Granule 遍历 TTBR1，命中 KVA L1[0x7e0] 与 L2[3..6]；
+4. 直跳 `arm_init`，跨过 C 语言大门！
 
 **v13 真机读屏铁证与彻底解码**：
 - **Row 1**: `TCR_EL1 = 0xa511a511` (TG1=2 标准 16K, T0SZ/T1SZ=17)
