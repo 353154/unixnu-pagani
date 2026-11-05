@@ -1455,3 +1455,48 @@ out/ipsw/21H461/044-76034-038.dmg.trustcache        # Cryptex1,SystemTrustCache
 **唯一的硬阻塞：`UEFI-Pagani_SM8750` 不公开。** `board.toml` 需要 `{uefi}/Platforms/OnePlus/oneplus13tPkg/oneplus13t.dsc`（Mu-Silicium 派生），但该仓库在 `IssacL04`、`Shad0w23333` 名下都没有公开条目，全站搜索也没有。没有它就只能出内核，出不了 `boot.img`。三条出路：① 找作者要（GitHub issue / Telegram `@unixnu` / QQ 群）；② 以 Mu-Silicium 为基底自建 `Platforms/OnePlus` 包（仓库里公开了 `patches/mu-*` 与 `Resources/MuPatches/OnePlus13T.patch`，可作蓝本，但工作量大）；③ 混合方案：用我们已有的 shim 加载他们构建出的 `kernel.macho`（但缺少 UEFI 的 HOB/内存图与 `UniXNURamDiskDxe` 交接，风险高）。
 
 **工具链现状（本机，无 brew）：** `ninja` 已用 pip 装好；`cmake` 待装；`dtc`、`glslang`/`shaderc`/`spirv-tools`（仅 GPU 线需要）缺。`openssl`、`bison`、`flex`、`rustup` 已有；Xcode 可用。
+
+### 14.19 内核本地构建失败＝缺 Xcode；正解是走仓库自带 CI（2026-11-06 01:42）
+
+`./unixnu build kernel` 在 `installhdrs` 阶段失败。根因不是源码，也不是补丁：
+
+```
+xcrun: error: unable to lookup item 'PlatformPath' from command line tools installation
+xcrun: error: unable to find utility "migcom", not a developer tool or in PATH
+xcrun: error: unable to find utility "iig", not a developer tool or in PATH
+/bin/sh: def: command not found            → make[5]: [IOBufferMemoryDescriptor.h] Error 127
+make[1]: *** [build_exporthdrs_mi_bootstrap_DEVELOPMENT^ARM64^BCM2837] Error 2
+```
+
+本机 `xcode-select -p` = `/Library/Developer/CommandLineTools`，`/Applications` 下**没有 Xcode**（CLT 14.3.1，macOS 13.7.8）。`migcom`、`iig` 只随 Xcode 提供，CLT 里没有。而本机能装的最高版本是 Xcode 15.2，工程却按 `macos-26` / Xcode 26 开发（`macos.yml` 里明确写了 macos-15 的 clang 会拒绝构建传入的告警选项）——**即使装上 Xcode 15.2 也可能因 `-Werror` 失败**。
+
+**正解在仓库里写着，我先前漏了。** `MIGRATION.md` 原文：*The kernel is built with macOS/Xcode in CI.* 设备仓库自带 `.github/workflows/xnu.yml`，`runs-on: macos-15`，最后一步：
+
+```
+- name: Upload kernel and inputs for local firmware and image assembly
+  uses: actions/upload-artifact@v4
+  path: kernel/**  logs/**  status.json  unixnu.lock  ram-data/**  original-static-system.bundle
+```
+
+也就是说**官方分工就是：CI 出内核 + Data seed + trust bundle，本地只做固件与镜像打包**。这条路不需要本机 Xcode，也不需要私有 UEFI 仓库。
+
+**已执行（全部只读或可回退）：**
+
+1. fork `IssacL04/UniXNU-Pagani_SM8750` → `353154/UniXNU-Pagani_SM8750`（服务端复制，未推送任何新内容）；
+2. `PUT /actions/permissions` 打开 Actions（fork 默认关闭），三个工作流 `active`：`xnu.yml`、`metal.yml`、`porting-record.yml`；
+3. `POST /actions/workflows/xnu.yml/dispatches {"ref":"main"}` → **Run 42077142165 in_progress**（macos-15，超时上限 360 分钟）。
+
+该工作流会自己 `checkout IssacL04/UniXNU_Enc3l@$(cat device/upstream.rev)`、`brew install` 工具链、`./unixnu ipsw fetch AppleLogo KernelCache OS Cryptex1,SystemOS StaticTrustCache Cryptex1,SystemTrustCache`（约 8.5 GB 从苹果服务器）、`prepare-ram-data.py` 造 1 GiB RAM Data、跑 9 个契约测试，最后 `./unixnu kernel -j 3`。
+
+**同时确认：私有 UEFI 仓库只是个薄壳。** 公开的 `Project-Silicium/Mu-Silicium`（`f971025`，2026-11-05）里已经带着本机型的平台包与配置：
+
+| 需要的路径 | Mu-Silicium 上游现状 |
+| :--- | :--- |
+| `Platforms/OnePlus/{oneplus13tPkg}/oneplus13t.dsc` | 有 `paganiPkg/pagani.dsc`（`PLATFORM_NAME=pagani`，`OUTPUT_DIRECTORY=Build/paganiPkg`） |
+| `Resources/Configs/oneplus13t.toml` | 有 `pagani.toml`：`base=0xA7100000`、`size=0x300000`、`header_version=4`、`requires_kernel_header=true` |
+| `BootShim/BootShim.S`、`Resources/Scripts/mkbootimg.py` | 有 |
+| `Resources/MuPatches/OnePlus13T.patch` | **缺**（上游 `MuPatches/` 只有 `Auth-Service` / `Boot-Manager` / `Timer` / `Usb-Bus` 四个通用补丁） |
+
+所以自建 UEFI 树 = 复制 `paganiPkg` → `oneplus13tPkg` 并改内部 `PLATFORM_NAME`/`OUTPUT_DIRECTORY`/`FLASH_DEFINITION`、复制 `pagani.toml` → `oneplus13t.toml`；唯一未知是那个 pagani 专用 Mu 补丁。`board.toml` 的 `[firmware]` 会把它 `git -C {edk2} apply`，缺失会直接报错，需先用 `patches = []` 或自写等价补丁跑通。
+
+**遗留待办：** `353154/unixnu-pagani-ci`（一个空仓库，建了但推送失败）无法用当前 token 删除——令牌只有 `repo, workflow` 作用域，缺 `delete_repo`，需用户在网页上删掉。
