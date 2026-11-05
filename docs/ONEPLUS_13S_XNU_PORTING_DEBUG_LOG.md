@@ -554,18 +554,20 @@ v4（`23e7859`）在两处补标记（x=180 深青 = isb 存活，x=220 深品�
 > **手机**：fastboot 序列号 `3B1F67EA9BBUHK76`，仅 `fastboot boot`（严禁 flash/erase），挂死=长按电源重启
 > **屏幕分辨率** 1216×2640，stride 4864；控制台/检测带布局见 §7 与 `~/Desktop/SCREEN_READ_PROMPT.md`
 
-### 8.1 当前进度快照（2026-11-05 08:30）
-- **已攻克**（按序）：OSLAR_EL1 UD → WXN/A → C=0→C=1 → CSE 致命性（isb/eret 全灭，全窗口 CSE-free 放行）→ **TG1 粒度编码**（苹果私有 1=16K vs ARM 标准 2=16K，补丁 0083）
-- **现场（08:45 更新）**：根因已锁死——**KVA L2 块描述符内容错误**（实读 0xA30 ≠ 期望 0xB00，详见 §7.16）；明日 v12 直接手写正确表项冲刺 arm_init
-- **路线**：M4（MMU）→ M5（arm_init/C 世界）→ M6 UFS → M7 APFS/launchd → M8 触屏
+### 8.1 当前进度快照（2026-11-05 22:15 刷新，**本节为唯一权威状态，旧版本内容已作废**）
+- **已攻克**（按序）：OSLAR_EL1 UD → WXN/A → C=0→C=1 → CSE 致命性 → TG1/TG0 粒度真相（`TGran16==0`，Oryon 只认 4KB）→ **原生 4KB 全量内核**（`__ARM_16K_PG__` 关闭 + `MACH_VM_MAX_ADDRESS` 断言修复）→ **`T1SZ=16` 四级 KVA 页表** → TTBR0 销毁/TTBR1 接管 → `arm_vm_init` + `pmap_bootstrap` 完整跑通（Stage 20）→ **XNU 真实 `kprintf` 日志上屏**
+- **当前死点（已用符号反查 + 源码交叉确证，不要重新猜）**：`initialize_screen()` 内 `ml_io_map_unmappable(0xfc800000, 12.8MB, VM_WIMG_IO)` 及其紧随的 `gc_initialize/vc_progress_set/gc_enable`。屏幕停在 `initialize_screen: b=FC800000, w=000004C0, h=00000A50, r=00001300, d=00000002` 之后，详见 **§13.3**
+- **重大认知修正**：`0012` 补丁因 `corrupt patch at line 100` 长期被 CI 跳过 → stage 10~31、`sweet_early_map_final()`、`+64MB` 早期 I/O 池**此前根本没编译进去**。曾经的"停点漂移"是补丁缺失导致的假象，不是硬件随机性。详见 **§12.2**
+- **路线**：M6 收尾（console 接管）→ M7 `kernel_bootstrap`/Thread 0 → M8 8 核 PSCI → M9 UFS/ramdisk → M10 launchd
+- **最新提交/构建**：`cc9b9d2` / Run `42042712579`（`0083`+`0084`+`0085`+`0086` 与真·`0012` 同时在场的第一版）
 
-### 8.2 调试循环（每轮 ~15 分钟）
-1. 改 `xnu/patches/0010-sweet-early-framebuffer-debug.patch`（start.s 的 SWEET 段）；0083 是 TG1 修复，勿动
-2. **推送前必验**：`cd ~/unixnu-pagani/xnu-src && git apply --check ../xnu/patches/0010-*.patch`；新汇编可抽出来用 `clang -c -arch arm64` 冒烟（stub MOV64 宏）
-3. commit+push → CI 自动构建（公库免费不限额）
-4. 哨兵脚本模板见 build_status.log 历史：轮询 run → 下载产物（api.github.com 快，CDN 偶发 6KB/s 重试即可）→ `python3 scripts/build_pagani_payload.py --kernel out/kernel.development.sweet --shim shim/out/Image --out-dir out` 合成 `out/test-boot.img`
-5. 手机进 fastboot → `fastboot boot out/test-boot.img`（~1.1s）
-6. 读屏：用户拍照 + `~/Desktop/SCREEN_READ_PROMPT.md` 协议让 Gemini 转述（本机 vision_analyze 今日不稳）；结果记入本文档 §7.x
+### 8.2 调试循环（每轮 ~15 分钟，已全自动）
+1. **改补丁必须单变量**：`0012`（早期控制台/stage 标记）、`0083`（汇编可见化）、`0084`（GIC 打点）、`0085`（console 接管打点）、`0086`（大红数字）各管一段，勿混改
+2. **推送前必验**：`cd ~/unixnu-pagani/xnu-src && git apply --check ../xnu/patches/0012-*.patch`（**每个**被改的补丁都要 check）
+3. commit + push → **一条命令跑完全链路**：`python3 tools/auto_boot_pipeline.py`
+   —— 自动轮询 CI → 失败则抓日志打印 `: error:` → 下载产物 → 校验内核里是否真含 `SWD00`/`SWE00`/`SWC01` 等标记串（**防再次"补丁没进去"**）→ 合成 `out/test-boot.img` → `adb reboot bootloader` → `fastboot boot`
+4. **读屏协议**：手机停屏后由用户拍照发来 → `ViewImage` OCR 读 `SWDxx`/`SWExx` 与 `kprintf` 文本 → `sips` 裁剪放大 → 必要时 `/tmp/pngdec.py` 逐像素读色带 → 读完再让用户重启（**绝不自动重启**）
+5. 结果按 `§13.x` 追加到本文档，保持"一次实验一个结论"
 
 ### 8.3 微信通知通道（已打通）
 - 推送：`/Users/damon/.hermes/installs/8c379330277d6bde/environments/a5231383ca1545bd8892d6f2844e56e5/venv/bin/python ~/unixnu-pagani/scripts/wxpush.py "消息"`
@@ -747,3 +749,75 @@ KVA L1 合法 → 硬件 walk 进入 L2 → L2 条目内容错误(0xA30) → 翻
 #### 11. 解决二次显存映射 L3 页表配额冲突 (2026-11-05 20:35)
 - **分析与修复**：
   `sweet_fbcon` 映射了 16MB，随后 `initialize_screen` 又试图进行第二次映射（12.25MB），两次累计 28.25MB。在 `osfmk/arm64/arm_vm_init.c:2255` 中为早期 I/O L3 页表额外预留 64MB 空间（`va_l1_end += (64 << 20)`），并已将补丁维护进代码库（Commit `2d80ac8`，Run `#42028219974` 构建成功）。
+
+#### 12. 观测链路定型 + 「0012 补丁从未生效」根因破获 (2026-11-05 21:00 ~ 21:40)
+
+本轮最关键的收获不是新代码，而是**承认一个长期存在的静默失败**：我们以为在跑的调试基础设施，有相当一部分从未被编译进去。
+
+##### 12.1 唯一的观测链路（设备无任何外部调试口）
+- **硬件现实**：OnePlus 13s 无 UART、无 JTAG；pstore/ramoops 需 root（BootShim 阶段拿不到）；Gunyah 下 EL2 日志不可达。**唯一可用通道就是那块被 XNU 接管的 framebuffer**（物理 `0xfc800000`，1216×2640，stride 4864）。
+- **读取手段**（全部本地、无外部服务）：
+  1. 用户整屏拍照 → `ViewImage` 直接做 OCR（能读出 `kprintf` 文本行与 `SWDxx`/`SWExx` 标记）；
+  2. `sips` 裁剪 + 放大局部（读小号 `iso_font` 8×16 文本）；
+  3. 自写纯 Python PNG 解码器（`/tmp/pngdec.py`）**逐像素采样色带**——不依赖 OCR，直接判断某阶段格是红/绿/亮/灭，抗模糊、抗反光。
+- **重要约束**：帧缓冲内容在重启后**不保留**（进 Android 会重绘，进 fastboot 会换 UI）。因此固定协作协议是：**停屏 → 用户立刻拍照 → 先发图 → 等我读完说"可以重启"再重启**，绝不自动重启。
+
+##### 12.2 根因：`0012` 补丁一直处于 `corrupt patch` 被跳过状态
+- **现象**：CI 日志长期出现 `Skipping patch xnu/patches/0012-sweet-keep-debug-console-after-ttbr0.patch: error: corrupt patch at line 100`，但构建仍然 success，因此被忽略。
+- **技术原因**：`git apply` 严格校验 hunk 头计数。`@@ -2259,10 +2293,17 @@` 声明的 10/17 行与实际上下文 21/26 行不符；另有 `sweet_early.c` hunk 多出一个 ` void` 上下文行、`arm_init.c` hunk 少一个前导空行。三处叠加导致整个文件被整份丢弃（不是局部失败）。
+- **灾难性影响**：`0012` 承载的 `sweet_early_map_final()`、`sweet_early_relocate()`、`va_l1_end += (64 << 20)`、以及 stage 10~31 阶段标记**全部不在内核里**。此前"色带只亮到个位数""停点位置反复漂移"的现象，本质不是硬件随机，而是**阶段标记根本不存在**。
+- **修复**：逐 hunk 重算计数并补齐上下文，`git apply --check` 通过后提交。
+- **教训**：本地 `xnu-src` 是残缺快照（缺 `config/MASTER.arm64.sweet` 等），只能对 `osfmk/`、`pexpert/` 做 dry-run，**无法本地验证完整补丁序列** → 唯一可靠的守门人就是 CI 日志里的 `Skipping patch` 字符串，必须每轮 grep。
+
+##### 12.3 附带修复：`0085` 编译失败（`kern/printf.h` 不存在）
+- 新增检查点代码里 `#include <kern/printf.h>` 直接编译失败（Run `42040481887`）。XNU 的真实声明在 `pexpert/pexpert/pexpert.h:233`，且该头不宜从 osfmk 侧引入；改为文件内 `extern void kprintf(const char *, ...);` 即可。
+
+#### 13. 三色检查点体系与死点最终锁定：`initialize_screen` 内的 `ml_io_map_unmappable` (2026-11-05 21:40 ~ 22:15)
+
+##### 13.1 本轮建立的检查点体系（四个补丁，各自职责单一）
+| 补丁 | 提交 | 标记 | 作用 |
+| :--- | :--- | :--- | :--- |
+| `0083-sweet-visible-early-boot-trace.patch` | `a13cd23` | `SWT in/ok` | 汇编层可见化：从 `_start` 到 `arm_init` 的每一跳 |
+| `0084-sweet-gic-bringup-checkpoints.patch` | `e282ae2` | `SWC01..SWC13`、`SWC20/21`、`SWC30..33` | GICv3 初始化逐段打点；将 `GICD_CTLR` 的 `RWP` 自旋改为 20 万次有界（原本是无超时死等） |
+| `0085-sweet-console-takeover-checkpoints.patch` | `1082d87`→`cc9b9d2` | `SWD00..SWD07`、`SWE00..SWE03` | `arm_init` → `arm_vm_init` → `serial_init` → `startup_initialize_upto` → `PE_create_console` 逐段打点 |
+| `0086-sweet-big-stage-readout.patch` | `cc9b9d2` | 64×128 红色大数字 | 在 `sweet_early_mark()` 内叠加 `sweet_early_big_number()`（`BIG_SCALE 8`、`BIG_X 24`、`BIG_Y 1180`），远距离拍照也能读数，摆脱对小号字体的依赖 |
+
+##### 13.2 关键代码链（读源码确认，非推测）
+`osfmk/arm/arm_init.c:516-571` 的真实顺序：
+```
+arm_vm_init()
+  → serial_init()
+  → startup_initialize_upto(STARTUP_SUB_KPRINTF)
+  → kprintf("kprintf initialized")
+  → kprintf("Serial mode specified: ...")
+  → PE_create_console()          ← 内部调用 initialize_screen()
+```
+**这行顺序改变了整个判断**：屏幕上停在第 3 行，不是"很早死机"，而是**已经成功走完 `arm_vm_init` 与 `serial_init`，恰好死在 console 接管的那一步**。
+
+##### 13.3 死点精确定位
+`osfmk/console/video_console.c:2792+` 的 `initialize_screen()` 在打印 `b=FC800000 ...` 之后，紧接着执行：
+```c
+newMapSize   = round_page(2640 * 4864);                          // ≈ 12.8MB
+newVideoVirt = ml_io_map_unmappable(0xfc800000, newMapSize, VM_WIMG_IO);
+gc_initialize(&vinfo);
+vc_progress_set();
+gc_enable();
+```
+与符号反查（`out/kernel.development.sweet.unstripped.yml`，73,277 个符号）得到的 `initialize_screen+0xdc` 完全吻合。**即：`ml_io_map_unmappable` 请求 12.8MB 的新映射，而早期 I/O L3 页表池在 `sweet_fbcon`(16MB) + 本轮新映射(12.8MB) 的双重压力下可能已耗尽——这与 §11 修过的"no PTE"panic 是同一族根因，只是这次没有 panic 出口，表现为静默冻结。**
+
+##### 13.4 本轮已排除的嫌疑（不要再重复怀疑）
+- boot-args 随机性（`startup_debug=0x1` 反而更早停 → 参数确实改变执行路径，已回退基线对照）；
+- framebuffer 踩内核内存（ADT 中 fb 与 RAM 区间不重叠）；
+- ADT 里 GIC 地址错误（已用上游 `sm8750.dtsi` 核对：GICD `0x16000000`、GICR `0x16080000`、size `0x200000`、redistributor-stride `0x40000`）；
+- KASLR（sweet 配置未启用）；
+- `+64MB` 导致内存饥饿（RAM 仍有 127MB 可用）；
+- `find_gicr_pe_base()` 死循环（上界为 `gicr_size`，最多 16 次）；
+- BSS 未清零（`shim/loader.c` 会清）；
+- 「124 秒看门狗自动复位」（**用户澄清是其本人手动重启**，属误判，已撤销该假设）。
+
+##### 13.5 下一步（按优先级）
+1. 等 Run `42042712579`（`cc9b9d2`）产物落地 → 自动合成镜像 → `fastboot boot`；
+2. 读屏顺序：**大红数字（阶段号）→ `SWDxx`/`SWExx` 行 → 底部色带**，三者交叉验证；
+3. 若确认停在 `SWE00`/`initialize_screen` 之间，则下一步直接在 `video_console.c` 的 `ml_io_map_unmappable` **前后各插一个 SWE 标记**，把"请求映射"与"映射返回"分开——二者之间即为最终死点；
+4. 若落在该调用，修复方向：在 `arm_vm_init.c` 再扩早期 I/O L3 池，或让 `initialize_screen` 复用 `sweet_fbcon` 已建立的 16MB 映射（`v_info` 直接指向既有 VA），避免二次映射。
+
