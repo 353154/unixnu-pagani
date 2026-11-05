@@ -166,17 +166,37 @@ def main():
                    check=True, stdout=subprocess.DEVNULL)
     print("IMAGE READY", flush=True)
 
-    if sh(f"adb -s {SERIAL} get-state 2>/dev/null") == "device":
-        sh(f"adb -s {SERIAL} reboot bootloader")
-        print("reboot bootloader issued", flush=True)
+    # 只要 adb 侧能看到本机序列号就重启（get-state 在设备刚重枚举时会返回 offline/空，
+    # 曾因此跳过 reboot 然后干等 fastboot 十分钟）
+    def adb_ready():
+        out = sh(f"adb -s {SERIAL} get-state 2>/dev/null")
+        return out in ("device", "recovery", "sideload")
 
-    for _ in range(200):
+    sent = False
+    for attempt in range(20):
+        if adb_ready():
+            sh(f"adb -s {SERIAL} reboot bootloader")
+            print(f"reboot bootloader issued (attempt {attempt + 1})", flush=True)
+            sent = True
+            break
+        if attempt == 0:
+            sh("adb start-server")
+        time.sleep(3)
+    if not sent:
+        print("adb not ready, assuming device may already be in fastboot", flush=True)
+
+    for i in range(240):
         dev = sh("fastboot devices")
         if dev:
             print("FASTBOOT", dev, flush=True)
             print(sh(f"fastboot boot {os.path.join(ROOT, 'out/test-boot.img')}"), flush=True)
             print("BOOTED", time.strftime("%H:%M:%S"), flush=True)
             return 0
+        # 60 秒还没出现：可能 reboot 没生效，或手机停在 Android，重发一次
+        if i and i % 20 == 0:
+            if adb_ready():
+                sh(f"adb -s {SERIAL} reboot bootloader")
+                print(f"  re-issued reboot bootloader @ {i * 3}s", flush=True)
         time.sleep(3)
     print("fastboot device never appeared", flush=True)
     return 3
