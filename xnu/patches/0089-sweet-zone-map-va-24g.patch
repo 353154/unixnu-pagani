@@ -1,0 +1,22 @@
+diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
+--- a/osfmk/kern/zalloc.c
++++ b/osfmk/kern/zalloc.c
+@@ -167,6 +167,18 @@
+ #define ZONE_MAP_MAX            (8ULL << 30)
+ #define ZONE_MAP_VA_SIZE        (24ULL << 30)
+ #endif /* !XNU_PLATFORM_MacOSX */
++
++/*
++ * sweet (OnePlus 13s / pagani): 本平台 kernel_map 仅约 48GB。
++ * MacOSX 分支的 128GB zone map VA 会让 kmem_add_extra_claims() 里的
++ * largest_free_size -= total_claims 无符号下溢，ptr_range/data_range
++ * 的尺寸随之变成 2^62 量级，vm_map_locate_space 必然失败。
++ * 改用 iOS 分支的 24GB：claims 总量约 27GB < 48GB 可用空间。
++ */
++#if XNU_PLATFORM_MacOSX
++#undef  ZONE_MAP_VA_SIZE
++#define ZONE_MAP_VA_SIZE        (24ULL << 30)
++#endif
+ 
+ __enum_closed_decl(zm_len_t, uint16_t, {
+ 	ZM_CHUNK_FREE           = 0x0,
