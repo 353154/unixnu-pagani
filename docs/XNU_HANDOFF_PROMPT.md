@@ -6,7 +6,7 @@
 > 项目：OnePlus 13s (`pagani` / SM8750 / Oryon 8 核) 移植 Apple XNU `xnu-8796.141.3`
 > 运行环境：Gunyah Hypervisor NS-EL1
 > 仓库：`~/unixnu-pagani`（GitHub `353154/unixnu-pagani`，main）
-> 最后更新：2026-11-05 23:45（`0090` 实测：`SWV1`+`SWV2` 出现、`SWV3` 未出现，死点后移到 `mac_policy_initmach`）
+> 最后更新：2026-11-06 00:12（**M7 达成**：`bsd_init()` 已进入，死点移进 BSD 子系统）
 >
 > **交接时只需移交本文件一份**（见下方「移交清单」）。不要整份粘贴 DEBUG_LOG。
 >
@@ -40,13 +40,13 @@ ls xnu/patches/ | tail -5                            # 最近加了什么探针
 
 | 项 | 值 |
 | :--- | :--- |
-| 当前阶段 | **M7 最后一段**：`initialize_screen` 已证实正常返回，`kernel_bootstrap` 尾巴只剩 `mac_policy_initmach` → `bsd_init` 这几个调用 |
-| 最新内核提交 | `0df72ad`（`0091` 在 `SWV2` 之后每个调用点后打 `SWP1..SWP11`）；`651db40`（`0090`）已实测 |
-| 最新构建 | `651db40` / Run `42054938305` 已实测（23:35:16 引导） |
-| 屏幕最后一行 | `kernel_bootstrap: mac_policy_initmach`（本轮真实最后一行；屏幕上更靠上的内容多为上轮残留，见 §2 末行） |
-| 死点 | `mac_policy_initmach()` 内部，或它返回后的 `vnguard_policy_init()`。**`initialize_screen()` 已被 `SWV2` 证明正常返回**，§13.3 的旧判断彻底作废 |
-| 已确认根因（前两关） | ① `zones` 索取 128GB VA 导致 kmem claims 下溢（`0089` 改 24GB，已解）；② video console 接管时用 `vinfo.v_baseaddr` 绘制即挂（`0090` 跳过，`SWV1` 实证 `serial=1` `vbase=fffffff014f08000`） |
-| 下一步动作 | 读 `SWP1..SWP11`，**编号最大的那个就是卡点**；出现 `SWP11` 说明 `kernel_bootstrap` 跑完，接着看 `SWV3`/`bsd_init` |
+| 当前阶段 | **M7 已达成（2026-11-06 00:06 实测）**：`kernel_bootstrap` 跑完，`bsd_init()` 已进入，打出了 BSD 版权行、`MAC Framework successfully initialized`、`using 462 buffer headers`。死点移进 BSD 子系统内部 |
+| 最新内核提交 | `231550f`（`0093` 打开 `DEBUG_BSDINIT`）；`f2d805e`（`0092` 放开 max_cpus 闸门）已实测 |
+| 最新构建 | `f2d805e` / Run 已实测（00:06:17 引导）；`231550f` 构建中并会自动引导 |
+| 屏幕最后一行 | `using 462 buffer headers and 462 cluster IO buffer headers`（`mbinit()` 的输出），之后无输出 |
+| 死点 | `bsd_init()` 内部、`mbinit()` 之后。`DEBUG_BSDINIT` 原为 0，所以内部日志全被编译掉、无法判读——`0093` 已打开，下一步直接看最后一条 `bsd_init: calling ...` |
+| 已确认根因（前三关） | ① `zones` 索取 128GB VA 致 kmem claims 下溢（`0089`，已解）；② video console 用未映射的 `vinfo.v_baseaddr` 绘制（`0090`，已解）；③ `kperf_init_early` → `ml_wait_max_cpus()` 永久睡眠，因为置位 `max_cpus_initialized` 的 `ml_set_max_cpus()` 只被 IOKit 的 `AppleARMSMP`/`IOCPU` 调用，而这两个驱动不存在（`0092` 自行放开闸门，已解） |
+| 下一步动作 | 读 `bsd_init: calling xxx` 的最后一条定位卡点；大概率会撞到 `vfs_mountroot()` 找不到根设备——`bsd_init` 后半段是 `while(TRUE)` 重试挂根，**准备 ramdisk 是这一关的正解，不是救火** |
 
 ---
 
@@ -224,37 +224,40 @@ python3 ~/unixnu-pagani/tools/auto_boot_pipeline.py --sha $(git rev-parse --shor
 
 ## 7. 下一步该做什么（精确到文件）
 
-### 7.1 当前这一轮：用 `SWP1..SWP11` 定位 `kernel_bootstrap` 尾巴
+### 7.1 当前这一轮：在 `bsd_init` 内部定位（`0093` 已打开日志）
 
-`0090` 已验证：`SWV1`+`SWV2` 都出现、`SWV3` 没出现。所以 `initialize_screen()` 已正常返回，死点后移到 `mac_policy_initmach()` 附近——**这一关的结论已经拿到，不需要再验证 `0090`**。
+`kernel_bootstrap` 那段已经收工，不要再回头验证 `SWP`/`SWV`。现在的位置是 `bsd_init()` 内部、`mbinit()` 之后。
 
-`0091-sweet-bootstrap-stage-probe.patch`（提交 `0df72ad`）在 `SWV2` 之后、每个调用点后面各打一行带序号的标记：
+之前看不见的原因很简单：`bsd/kern/bsd_init.c:493` 有 `#define DEBUG_BSDINIT 0`，它把 `bsd_init_kprintf` 定义成空宏，**内部每一步的日志都被编译掉了**。`0093` 把它改成 1，于是全程会打印 `bsd_init: calling xxx`。
 
-| 标记 | 位置 | 出现即证明 |
+判读：**屏幕最后一条 `bsd_init: calling xxx` 就是卡点。** 注意 FB 是环形缓冲（82 行），`bsd_init` 日志量大，很可能绕回覆盖，务必拍上下两张。
+
+`bsd_init()` 的关键序列（行号对 `bsd/kern/bsd_init.c`）：
+
+| 行 | 调用 | 状态 |
 | :--- | :--- | :--- |
-| `SWP1` / `SWP2` | `vm_commpage_init`+`vm_commpage_text_init` 前后 | commpage 两块都过了 |
-| `SWP3` | `mac_policy_initmach()` 之后 | MAC 框架 init 返回 |
-| `SWP4` | `vnguard_policy_init()` 之后 | vnguard 策略加载返回 |
-| `SWP5` | `dtrace_early_init()` 之后 | DTrace 早期初始化返回 |
-| `SWP6` | `load_static_trust_cache()` 之后 | 信任缓存加载返回 |
-| `SWP7` | `kernel_startup_initialize_upto(STARTUP_SUB_LOCKDOWN)` 之后 | 锁定期子系统全通 |
-| `SWP8` | `OSKextRemoveKextBootstrap()` 之后 | kext 引导段已剥离 |
-| `SWP9` | `machine_lockdown()` 之后 | 内核文本已只读化 |
-| `SWP10` | `PE_lockdown_iokit()` 之后 | IOKit 锁定完成 |
-| `SWP11` | `vm_set_restrictions()` 之后 | 尾巴跑完，下一句就是 `SWV3`/`bsd_init` |
-
-**判读规则：屏幕上编号最大的那个 `SWP` 就是卡点。** 不要按行位置判断（见 §2 末行），FB 是环形缓冲。
+| 570 | `mac_policy_initbsd()` | ✅ 已过（`MAC Framework successfully initialized`） |
+| 700 | `mcache_init()` | ✅ 已过 |
+| 706 | `mbinit()` | ✅ 已过（`using 462 buffer headers...`） |
+| 713 | `audit_init()` | ❓ |
+| 720 | `knote_init()` | ❓ |
+| 724 | `eventhandler_init()` | ❓ |
+| 728 | `aio_init()` | ❓ |
+| 856 | `inittodr(0)` | ❓ |
+| 868 | `setconf()` | ❓ 选根设备 |
+| 870 | `vfs_mountroot()` | ❓ 挂根，失败会进 `while (TRUE)` 无限重试 |
 
 ### 7.2 按结果分支
 
-- **`SWP11` 出现** → `kernel_bootstrap` 尾巴全通，直接看 `SWV3` 是否出现：出现即 M7 达成，转 7.3；不出现则死点在 `vm_set_restrictions` 与 `bsd_init` 之间（只剩 `kperf_init_early`）。
-- **卡在 `SWP3` 之前** → `mac_policy_initmach()` 本身挂了。注意该函数源码只有 `load_security_extensions_function()` 和 `mac_late = 1` 两句，而该函数指针在 `security/mac_base.c` 里**没有任何赋值点**，正常应为 0。若真挂在这里，说明是别的东西（栈、异常向量、kprintf 重入），要单独一轮二分。
-- **卡在 `SWP3`→`SWP4`** → `vnguard_policy_init()` 内部。这是本项目首次进 MAC 策略的真实执行路径，值得优先怀疑 label 相关 zone/锁。
-- **一个 `SWP` 都没有** → `0091` 没进内核。看流水线 `MARK SWP1` 是否为负。
+- **卡在 `vfs_mountroot`** → 这是预期中最可能的结果。没有根设备，它会清空 `rootdevice` 再重试，并 `printf` 错误信息。**正解是提供 ramdisk，不是改代码绕过**——这不是 bug，是缺少运行时依赖。
+- **卡在 `mbinit` 与 `vfs_mountroot` 之间的某个 init** → 逐个看该函数是否依赖不存在的驱动/资源（`audit_init` 依赖 kauth、`knote_init` 依赖 kqueue zone、`aio_init` 依赖 workqueue）。
+- **完全看不到 `bsd_init: calling`** → `0093` 没进内核，看流水线 `MARK bsd_init: calling` 是否为负。
 
 ### 7.3 通过之后
 
-`bsd_init`（M9，需要 ramdisk/UFS）→ 8 核 PSCI（M8）→ launchd（M10）。
+`bsd_init` 挂根（M9，需要 ramdisk/UFS）→ 8 核 PSCI（M8）→ launchd（M10）。
+
+**M8 的入手点已经测出来了**：`SWP12` 打出 `wait_max_cpus n=1`，说明 `machine_info.max_cpus` 现在是 **1**——PE 只枚举了一个 CPU。这不是配置问题，是没有 `AppleARMSMP` 平台驱动来上报 CPU topology。做 M8 时从这里开始，而不是从 PSCI 汇编开始。
 
 **同时值得评估**：本构建为什么走 `XNU_PLATFORM_MacOSX` 分支。`0089` 只打了一个宏补丁，没改平台判定；若后续再遇到「Mac 有、iOS 没有」的常量差异（zalloc / IOKit / 驱动加载路径上还有若干处），应整体切到 iOS 平台配置。**但那是一次大改，必须单独一轮、单独归因。**
 

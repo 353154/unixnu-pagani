@@ -1073,3 +1073,30 @@ kernel_bootstrap: mac_policy_initmach
 **方法论教训（已写入交接文档 §2）**：`0003` 的 `fbcon` 是环形缓冲，`fbcon_rows = 2640/32 = 82` 行，写满绕回顶部覆盖；且跨引导不会把上一轮像素清干净。所以**屏幕位置既不代表执行顺序，也不代表同一轮次**。以后一律用编号单调递增的标记判进度。
 
 下一轮：`0091`（提交 `0df72ad`）在尾巴每个调用点后打 `SWP1..SWP11`，取最大编号即卡点。
+
+### 14.10 **M7 达成**（00:06:17 引导，提交 `f2d805e`）
+
+屏幕实际序列：
+
+```
+SWP11 vm_set_restrictions done
+SWP12 wait_max_cpus n=1
+SWP13 max_cpus released
+SWP14 kperf done
+SWV3 entering bsd_init
+Copyright (c) 1982, 1986, 1989, 1991, 1993
+The Regents of the University of California. All rights reserved.
+
+MAC Framework successfully initialized
+using 462 buffer headers and 462 cluster IO buffer headers
+```
+
+`SWV3` 出现 = `kernel_bootstrap` 全程跑完，`bsd_init()` 被调用。**M7 达成。**
+
+**根因确认（第三关）**：`kperf_init_early()` 第一句调 `ml_wait_max_cpus()`，该函数 `lck_mtx_sleep` 直到 `max_cpus_initialized == MAX_CPUS_SET`；arm 上唯一置位者是 `ml_set_max_cpus()`，而它的调用点全库只有 `iokit/Kernel/arm/AppleARMSMP.cpp:170` 和 `iokit/Kernel/IOCPU.cpp:580` —— 两个都不存在的 IOKit 平台 CPU 驱动。闸门永远不开，内核不是崩溃而是**永久睡眠**。`0092` 在 `vm_set_restrictions` 之后自行 `ml_set_max_cpus(machine_info.max_cpus)`，一句解决。
+
+**顺带测出一个关键事实**：`SWP12` 打出 `n=1`，即 `machine_info.max_cpus == 1`。PE 只枚举了一个 CPU，这正是 `AppleARMSMP` 缺失的另一个表现。M8 要做的第一件事是补 CPU topology 上报，不是从 PSCI 汇编开始写。
+
+**新死点**：`bsd_init()` 内部、`mbinit()` 之后（屏幕上 `using 462 buffer headers` 是最后一条）。之所以之前完全看不见内部进度，是因为 `bsd/kern/bsd_init.c:493` 的 `#define DEBUG_BSDINIT 0` 把 `bsd_init_kprintf` 编成了空宏。`0093` 改为 1，之后每一步都会有 `bsd_init: calling xxx`。
+
+预期下一关是 `vfs_mountroot()` 找不到根设备（`bsd_init` 后半段是 `while (TRUE)` 重试挂根）。**正解是准备 ramdisk，不是改代码绕过**。

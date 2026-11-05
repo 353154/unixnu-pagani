@@ -93,9 +93,9 @@ flowchart TD
 | **M4** | 4KB 原生分页 MMU 激活与 KVA 蹦床 |  **已达成** | `SCTLR_EL1.M=1`、`isb` 存活，高半区映射成功 |
 | **M5** | 进入 `arm_init` 与内核早期初始化 |  **已达成** | 149MB 全量原生 4KB 内核编译与加载成功 |
 | **M6** | 早期虚拟内存与控制台交接 | 🟡 **VM 侧全通 / console 未通** | Stage 20 达成、`kprintf` 真实日志上屏；但 console 接管卡在 `initialize_screen` 的 `ml_io_map_unmappable`（12.8MB 二次映射） |
-| **M7** | 核心调度器与 IOKit 框架启动 | 🔄 **当前攻坚** | 打通 console 接管后即可推进 `arm_init` 尾声 → `machine_startup` → `kernel_bootstrap` |
+| **M7** | 核心调度器与 IOKit 框架启动 | ✅ **已达成 (2026-11-06 00:06)** | `kernel_bootstrap` 全程跑完并进入 `bsd_init()`；连破三关：zones 128GB 下溢、video console 未映射 `vbase`、`max_cpus` 闸门永不开 |
 | **M8** | 8 核 SMP PSCI 唤醒 | ⏳ 规划中 | 启动从核调度 |
-| **M9** | 根文件系统挂载 (Ramdisk / UFS) | ⏳ 规划中 | 挂载初始系统盘 |
+| **M9** | 根文件系统挂载 (Ramdisk / UFS) | 🔄 **当前攻坚** | `bsd_init` 已进入，下一步 `vfs_mountroot()` 需要 root ramdisk |
 | **M10**| 用户态跨越 (PID 1 launchd / init) | ⏳ 规划中 | 进入 EL0 用户空间 |
 
 ---
