@@ -1283,6 +1283,8 @@ userland/mnt → 空（尚未解包）
 
 同时把 iOS 目标拆成 L1（iOS 平台语义的内核）/ L2（exec 一个 iOS 二进制）/ L3（launchd）/ L4（SpringBoard 上屏），并如实标注 **L4 受 DCP + Metal 阻塞**：SpringBoard 自 iOS 10 起只走 Metal，Adreno 830 在 XNU 内没有 GPU 驱动也没有显示控制器驱动。L1–L3 属工程问题，L4 属能力缺口，两者不能混为一谈。
 
+> **⚠ 本段关于 L4 的判断已被 §14.16 更正**：上游 `ios-sweet` 在无 GPU 驱动的条件下用 CoreAnimation **软件渲染**把 SpringBoard 画到了屏幕上（20–30 fps）。"只走 Metal 所以上不了屏"是错的，L4 不是能力缺口，是性能问题。
+
 ### 14.15 `0095` 实测：`skmem_init` 整段跑完，死点后移到 `nexus_init`（2026-11-06 01:02 引导，提交 `1a92e67`）
 
 照片读到的标记（两张合看，屏幕顶部为最新、底部更旧）：
@@ -1318,3 +1320,54 @@ SWX6 thread_call ok → SWX7 sg_cache done → SWX8 dispatch queued
 
 - `SWEET: trust caches unavailable (image4/AMFI not installed)` —— 我们的 AMFI 是 `SWEET` 桩，没有 image4 验证、也没有 trust cache。L2/L3 要 exec 真正的 iOS 二进制时，这条必须先解（checkra1n 系的做法是打补丁让 AMFI 放行 + 注入假 trust cache）。
 - `mcache: 1 CPU(s), 64 bytes CPU cache line size` —— 仍是单核，M8 未做。
+
+### 14.16 上游对照：`stossy11/ios-sweet` 已经把同一目标跑通了（2026-11-06 01:25）
+
+用户问"网络上别人都是怎么实现的"。查证结果是：**这个项目不是无人区，我们的仓库本身就是那条路的 pagani 移植分支。**
+
+- 上游 `github.com/stossy11/ios-sweet`（另有 `dipa-studio/ios-sweet`）：Redmi Note 10 Pro（`sweet` / SM7150 / Snapdragon 732G），XNU `xnu-8796` + **未修改的 iPhone X iOS 16.7.16 (20H392) 用户态**，2026-10-18 起能开机到 iOS 桌面（锁屏、主屏、控制中心、设置、触摸、实体键）。
+- 同源证据：本仓库 `xnu/patches/0001–0069` 与上游**逐条同名同序**（`0001-new-clang-*` … `0069-sweet-ufs-faster`），`tools/` 整套相同（`mkadt.py`、`mkpayload.py`、`mkiosroot.sh`、`sweet-root-tweaks.py`、`sweet-log-pull.sh`、`qemu-sweet.py`、`xnu-cc.py`），`shim/` 结构也一致。
+
+**上游的六层实现与关键参数（可直接对照移植）**
+
+| 层 | 做法 | 关键值 |
+| :--- | :--- | :--- |
+| 引导 | `fastboot boot` shim（Android boot.img v2），shim 自建 MMU、读活 FDT、从 ramdisk 取 payload → XNU Mach-O + 生成的 ADT + boot-args；**不写任何分区** | 回到 fastboot：电源+音量下 |
+| 平台 | non-PAC arm64、16K 页、GICv3、PSCI via `smc`、19.2 MHz 定时器 | 定时器走 Group1 IRQ（虚拟定时器 INTID 19），**不是苹果的 FIQ**；MPIDR 用 Aff1 取核号；RAM 用上半 bank `0x100000000 + 0xfcc00000`（≈3.95 GiB，避开高通 carve-out） |
+| 内核粘合 | 用开源件替闭源件：libpthread、HFS、BearSSL(AES/SHA/MD5)、最小 AMFI、AppleKeyStore 桩、IOWatchdog 关掉；先 mockfs 假根盘再上真盘 | 安全模型基本关掉：permissive AMFI + sandbox、无 data protection |
+| 存储 | 自写 UFS host driver，**HFS+ 根卷建在 `userdata` 分区**（读写、>4 GiB DMA） | 会清空 Android 用户数据；先 `fsck.hfsplus -fy` |
+| 用户态 | 真 iPhone X 根盘 + shared cache，dyld → launchd → daemons → backboardd → SpringBoard；`sweet-root-tweaks.py` 离线改根盘（跳过 Setup、种激活态、删 basebandd、关杀慢进程的 watchdog） | 设备身份给 `iPhone10,3`/D22AP，激活走 `mobileactivationd` 的**原生 Hactivation**，不连苹果服务器 |
+| 界面 | 内核 IOSurface(`IOCoreSurfaceRoot`) + IOMobileFramebuffer(`AppleCLCD`)，**CoreAnimation 软件渲染**，节流拷贝进 bootloader 留下的帧缓冲 | 对 iOS 自称 1125×2436 iPhone X 面板；`PRIV_WORK_INTERVAL` 给 UIKit；20–30 fps |
+| 输入 | Apple `IOHIDFamily-1915.140.3` 用户态 client + 事件队列 | 触摸 Goodix GT9896 @ I²C `0x5d`（QUP SE7 `0xa84000`），PM6150L LDO11 经 RPMh 供电；按键 PM6150 PON（SPMI） |
+| 可观测性 | **`userdata` 末尾 4 MiB 日志环**（header magic `SWEETLOG`，含 size/total/seq），每秒刷一次；`tools/sweet-log-pull.sh` 从 OrangeFox 恢复 adb 拉取 | README 原话：*so you don't have to film the screen* |
+
+上游 boot-args 实参（对照我们自己的 `mkpayload.py`）：
+
+```
+debug=0xc serial=3 cpus=6 keepsyms=1 -enable_kprintf_spam -noprogress
+rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 ufsrw=1 rootrw=1
+launchd_unsecure_cache=1 wdt=-1 wdt_test=no_user_checkin
+sweetfb_noconsole=1 sweetfb_hz=30
+```
+
+其中 `cpus=6` 是"启动六个 A55"（`cpus=1` 为安全回退），`sweetfb_noconsole=1` 让内核文字不再覆盖 GUI（仍进日志环，panic 才画屏），`wdt=-1` 关硬件看门狗。
+
+**四条结论**
+
+1. **§14.14 的"L4 受 Metal 阻塞"撤回。** 上游在无 GPU 驱动下靠 CPU 软件渲染出了桌面。L4 从"能力缺口"降级为"性能问题（20–30 fps）+ 只支持 iPhone X 分辨率"。
+2. **M9 的 A/B 岔路有实证答案：选 A。** 上游就是"UFS 驱动 + `userdata` 内 HFS+ 根"，开源 XNU 原生 `bsd/hfs` 即可挂，不需要 APFS。B 路（跑 Apple kernelcache）没有先例。
+3. **拍照流程有正解：日志环。** 但它由内核在 UFS 可写之后才启动，所以**挂根之前这一段仍必须拍照**；过 `vfs_mountroot` 后应立刻切到日志环，此后不再需要用户举手机。
+4. **我们的真实差距是 pagani 适配，不是方案。** `mcache: 1 CPU(s)` 说明 `0065-sweet-smp-psci` 没在我们这台生效（上游是 6×A55 + `cpus=6`）；GIC 版本（SM8750 为 GICv4.1）、定时器频率、UFS 控制器、面板 1216×2640、触摸型号（不是 GT9896）都要重测。补丁全在仓库、却卡在 `skywalk_init`，正是"通用层被平台层的错误拖住"的典型表现。
+
+**并行路线（不同做法，可作交叉验证）**
+
+- **HackiOS / OOSEX GANG**（`oosexgang/hackios-xnu-kernel` + `-userland`）：POCO X5 Pro 5G（778G），iOS 16.5 用户态（`xnu-8796.121.2`）。**不走 shim，走自研 UEFI + EFI loader**；纯 RAM 引导、会话限时 15–20 分钟、日志交还 loader；Wi-Fi 是**把 Linux 驱动套一层兼容层**跑起来的，相机可用；蜂窝/蓝牙/Metal 应用/Apple ID 不行。社区移植：K20 Pro（raphael，GPU 加速+Wi-Fi+后摄可用）、小米 8、MIX2S、一加 13T。
+- **j0sh1x**：HTC HD2 跑 iOS 7.1.2（2026-10，目标固件 iPhone 4，仍是无 PAC 那一代），能亮能触控但极卡，内核与硬件支持代码已开源。
+- **`jprx/darwin-vm`**：QEMU 里把 iOS/macOS 起 root shell，模拟 iPhone 12–17（A14–A19）与 M1–M5 —— 可作我们 QEMU 快回路的参照。
+- 更早的 checkra1n / Project Sandcastle 是反方向（iPhone 跑 Android），可借的只有 checkm8 之后的信任链绕过思路。
+
+**绕不过的三堵墙（所有项目一致）**
+
+1. **无 PAC 是硬门槛**：iPhone X 是最后一代无 PAC 的机器，所以所有项目都停在 iOS 16 / iPhone X；Pixel 6（Tensor）与 Galaxy S7（Exynos 8890）的尝试都失败。
+2. **SEP 缺失**：没有 Secure Enclave，Apple ID / App Store / FairPlay 直接退出（`fairplayd` 起不来），这不是驱动问题。
+3. **闭源固件**：蜂窝基带、蓝牙固件、充能握手都在厂商手里；上游至今插着电还在掉电。

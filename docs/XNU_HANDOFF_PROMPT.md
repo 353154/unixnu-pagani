@@ -42,14 +42,14 @@ ls xnu/patches/ | tail -5                            # 最近加了什么探针
 | :--- | :--- |
 | **最终目标** | **在这台手机上引导 iOS 16 用户态**（iPhone X `iPhone10,3` / iOS 16.7.16 `20H392`，根盘已备于 `userland/rootfs_rw.dmg`）。**不是**"做个自绘界面"——任何把目标降级为"能看到点东西"的方案都不算达成。分层见 §7.0 |
 | 当前阶段 | **M9 推进中（2026-11-06 01:02 实测，`0095`）**：`bsd_init()` 越过 `IOKitInitializeTime` 后连过 12 个子系统进入 `skywalk_init()`，**`skmem_init()` 已整段跑完**（`SWX1`/`SWX6`/`SWX7`/`SWX8`/`SWX2`/`SWX3`/`SWX4` 全部出现，见 §14.15），停在 `nexus_init()` 或 `channel_init()` 里，`SWY2` 未出现 |
-| 最新内核提交 | `f65e20a`（`0096`：`nexus_init` 内 `NX1..NX5`、`skywalk_init` 内 `SK0`/`NX6`/`CH1`/`SK1..SK4`），**构建中** |
-| 最新构建 | `1a92e67`（`0095`）/ Run `63` success，**已实测** |
-| 最新引导 | `1a92e67` 01:02:35 引导成功（`fastboot boot` OKAY）；`f65e20a` 构建完将自动引导 |
+| 最新内核提交 | `f65e20a`（`0096`：`nexus_init` 内 `NX1..NX5`、`skywalk_init` 内 `SK0`/`NX6`/`CH1`/`SK1..SK4`） |
+| 最新构建 | `f65e20a`（`0096`）/ Run `149327161` **success**（01:16）；`1a92e67`（`0095`）/ Run `63` 已实测 |
+| 最新引导 | `1a92e67` 01:02:35 引导成功；`f65e20a` 的自动引导**被跳过**（`skipped_invisible`：adb 与 fastboot 均为空——手机仍停在 0095 的 XNU 画面）。**需长按电源+音量下重启到 fastboot 后重发** |
+| 上游对照 | **本仓库是 `stossy11/ios-sweet`（Redmi Note 10 Pro / SM7150）的 pagani 移植分支**：`xnu/patches/0001–0069` 与 `tools/` 逐条同名。上游 2026-10-18 已开机到 iOS 桌面（同为 iPhone X 16.7.16 20H392），六层实现与关键参数见调试日志 §14.16。**这改变了三件事：L4 不再受 Metal 阻塞（软件渲染可出桌面）、M9 选 A 路（HFS+ 根在 userdata）、拍照流程应换成 userdata 末尾的 4 MiB 日志环** |
 | 屏幕最后一行 | 按写入顺序最后一条是 `SWX4 pp_init done`（`skmem_init()` 返回）。**注意照片布局是反的**：写指针绕回后，屏幕**顶部**是最新内容、底部反而更旧 |
 | 死点 | `skywalk_init()` 里 `skmem_init()` 返回之后的 `nexus_init()` / `channel_init()`。这一段整段在 `SK_LOCK()` 内，任何一处等锁或等分配都会表现为静默停屏 |
 | 已确认根因（前五关） | ① `zones` 索取 128GB VA 致 kmem claims 下溢（`0089`）；② video console 用未映射的 `vinfo.v_baseaddr` 绘制（`0090`）；③ `kperf_init_early` → `ml_wait_max_cpus()` 永久睡眠（`0092`）；④ `IOKitInitializeTime` 等不存在的 `IORTC`（`0094`）；⑤ `skywalk_init` 内的 `skmem_region_init` 三条可疑语句**已排除**：`thread_call_allocate` / `skmem_cache_create("sg")` / `skmem_dispatch` 全部通过，说明**延迟 thread call 能排进去、`skmem_init` 不依赖定时器中断也能走完**（`0095` 实测） |
-| 下一步动作 | 读 `NX1..NX6` / `CH1`，**编号最大（或最后一个出现）的即死点**。`CH1` 出现 = `skywalk_init` 通过，继续看 `SWY2..`；`SWA2` 出现 = 已到 `vfs_mountroot` 门口，转 §7.0 的 APFS 岔路 |
-| 台账快照 | 自动生成 11-06 00:56 · HEAD `1a92e67` · 最新 CI Run 63 `1a92e67` in_progress · 最近引导 `fcb0a59` 00:48:05 booted |
+| 下一步动作 | ① 让手机回到 fastboot（电源+音量下），重发 `0096`；② 读 `NX1..NX6` / `CH1`，**编号最大的即死点**；`CH1` 出现 = `skywalk_init` 通过；`SWA2` 出现 = 已到 `vfs_mountroot`，转 §7.0（按上游经验**选 A 路**）；③ 之后把 `cpus=6`/PSCI SMP 与日志环列为必做项（见调试日志 §14.16） |
 | 台账快照 | 自动生成 11-06 00:56 · HEAD `1a92e67` · 最新 CI Run 63 `1a92e67` in_progress · 最近引导 `fcb0a59` 00:48:05 booted |
 
 ---
