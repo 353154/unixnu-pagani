@@ -1,0 +1,25 @@
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -90,6 +90,7 @@
+ #if CONFIG_SCHED_SFI
+ #include <kern/sfi.h>
+ #endif
++extern void ml_set_max_cpus(unsigned int max_cpus);
+ #include <kern/startup.h>
+ #include <kern/task.h>
+ #include <kern/thread.h>
+@@ -789,10 +790,14 @@
+ 	 */
+ 	vm_set_restrictions(machine_info.max_cpus);
+ 	kprintf("SWP11 vm_set_restrictions done\n");
++	kprintf("SWP12 wait_max_cpus n=%d\n", machine_info.max_cpus);
++	ml_set_max_cpus(machine_info.max_cpus);
++	kprintf("SWP13 max_cpus released\n");
+ 
+ 
+ #if KPERF
+ 	kperf_init_early();
++	kprintf("SWP14 kperf done\n");
+ #endif
+ 
+ 	/*
