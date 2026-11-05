@@ -39,8 +39,23 @@ if TOK:
     H["Authorization"] = f"token {TOK}"
 
 
+def _raw(u, headers=None, tries=5):
+    """带指数退避的 GET。GitHub 的 TLS 偶发被中断（SSL: UNEXPECTED_EOF），必须重试。"""
+    last = None
+    for i in range(tries):
+        try:
+            req = urllib.request.Request(u, headers=headers or H)
+            return urllib.request.urlopen(req, timeout=60).read()
+        except Exception as e:                      # URLError / SSLEOFError / 超时
+            last = e
+            wait = 2 ** i
+            print(f"  retry {i + 1}/{tries} after {wait}s: {type(e).__name__}", flush=True)
+            time.sleep(wait)
+    raise last
+
+
 def get(u):
-    return json.loads(urllib.request.urlopen(urllib.request.Request(u, headers=H)).read().decode())
+    return json.loads(_raw(u).decode())
 
 
 def sh(c):
@@ -97,13 +112,25 @@ def main():
     print("ART", art["name"], art["size_in_bytes"], flush=True)
 
     class Redirect(urllib.request.HTTPRedirectHandler):
-        def http_error_302(self, req, fp, code, msg, headers):
-            return urllib.request.urlopen(
-                urllib.request.Request(headers["Location"], headers={"User-Agent": "Python"}))
+        # 302 会跳到 objects.githubusercontent.com 的预签名地址，不能带 token
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return urllib.request.Request(newurl, headers={"User-Agent": "Python"})
 
-    req = urllib.request.Request(
-        f"https://api.github.com/repos/{REPO}/actions/artifacts/{art['id']}/zip", headers=H)
-    data = urllib.request.build_opener(Redirect).open(req).read()
+    opener = urllib.request.build_opener(Redirect)
+    url = f"https://api.github.com/repos/{REPO}/actions/artifacts/{art['id']}/zip"
+
+    data = None
+    for i in range(5):
+        try:
+            data = opener.open(urllib.request.Request(url, headers=H), timeout=300).read()
+            break
+        except Exception as e:
+            print(f"  zip retry {i + 1}/5: {type(e).__name__}", flush=True)
+            time.sleep(2 ** i)
+    if data is None:
+        print("ZIP DOWNLOAD FAILED", flush=True)
+        return 1
+
     zipfile.ZipFile(io.BytesIO(data)).extractall(os.path.join(ROOT, "out"))
     print("EXTRACT", len(data), flush=True)
 
