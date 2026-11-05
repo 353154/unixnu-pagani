@@ -1,0 +1,53 @@
+diff --git a/osfmk/vm/vm_kern.c b/osfmk/vm/vm_kern.c
+--- a/osfmk/vm/vm_kern.c
++++ b/osfmk/vm/vm_kern.c
+@@ -3470,6 +3470,8 @@
+ 	       kmem_ptr_ranges;
+ }
+ 
++extern void kprintf(const char *fmt, ...);
++
+ __startup_func
+ static void
+ kmem_add_extra_claims(void)
+@@ -3477,6 +3479,10 @@
+ 	vm_map_size_t largest_free_size = 0, total_claims = 0;
+ 
+ 	vm_map_sizes(kernel_map, NULL, NULL, &largest_free_size);
++	kprintf("SWK0 kmap min=%llx max=%llx lfree=%llx\n",
++	    (unsigned long long)kernel_map->min_offset,
++	    (unsigned long long)kernel_map->max_offset,
++	    (unsigned long long)largest_free_size);
+ 	largest_free_size = trunc_page(largest_free_size);
+ 
+ 	/*
+@@ -3494,6 +3500,9 @@
+ 	}
+ 	assert((total_claims & PAGE_MASK) == 0);
+ 	largest_free_size -= total_claims;
++	kprintf("SWK1 claims=%llx lfree=%llx n=%u\n",
++	    (unsigned long long)total_claims,
++	    (unsigned long long)largest_free_size, kmem_claim_count);
+ 
+ 	/*
+ 	 * Use half the total available VA for all pointer allocations (this
+@@ -3518,6 +3527,10 @@
+ 	/*
+ 	 * Add claims for kmem's ranges
+ 	 */
++	kprintf("SWK2 ptr=%llx data=%llx spray=%llx pr=%u\n",
++	    (unsigned long long)ptr_range_size,
++	    (unsigned long long)data_range_size,
++	    (unsigned long long)sprayqtn_range_size, kmem_ptr_ranges);
+ 	data_range_size += kmem_add_ptr_claims();
+ 	assert(data_range_size + sprayqtn_range_size +
+ 	    ((ptr_range_size + kmem_meta_size) * kmem_ptr_ranges) <=
+@@ -3592,6 +3605,8 @@
+ 		struct mach_vm_range *sp_range = sp.kc_range;
+ 		if (vm_map_locate_space(kernel_map, sp.kc_size, 0,
+ 		    VM_MAP_KERNEL_FLAGS_ANYWHERE(), &start, NULL) != KERN_SUCCESS) {
++		kprintf("SWK3 claim=%s size=%llx start=%llx\n", sp.kc_name,
++		    (unsigned long long)sp.kc_size, (unsigned long long)start);
+ 			panic("kmem_range_init: vm_map_locate_space failing for claim %s",
+ 			    sp.kc_name);
+ 		}
