@@ -14,12 +14,12 @@
 
 | 项 | 值 |
 | :--- | :--- |
-| 当前阶段 | M6 收尾：早期 VM 已全通，**卡在 console 接管** |
-| 最新内核提交 | `cc9b9d2`（`0012` 真生效 + `0083`~`0086` 首次同时在场）；之后 `c376116` 仅改文档 |
-| 最新构建 | Run `42042712579` |
-| 屏幕最后一行 | `initialize_screen: b=FC800000, w=000004C0, h=00000A50, r=00001300, d=00000002` |
-| 死点 | `osfmk/console/video_console.c:2792+` → `ml_io_map_unmappable(0xfc800000, 12.8MB, VM_WIMG_IO)` |
-| 下一步动作 | 在该调用**前后各插一个 SWE 标记**，二分出到底是它本身死还是 `gc_initialize` 之后死 |
+| 当前阶段 | **M6 已完成**（console 接管通过），进入 M7：`kernel_bootstrap` 跑到 VM 子系统后卡在 kmem 空间分配 |
+| 最新内核提交 | `d3c06d7`（`0087` kmem 探针）；上一版 `cc9b9d2` 是 `0012` 真生效的首个构建 |
+| 最新构建 | Run `42045809346`（d3c06d7） |
+| 屏幕最后一行 | `maximum number of VM swap files: 100`（在 panic 之后仍会继续打印，别用它当死点） |
+| 死点 | `kmem_range_init: vm_map_locate_space failing for claim vm_ptr_range @vm_kern.c:3645` —— **kernel_map 虚拟空间**分配失败，与物理内存无关 |
+| 下一步动作 | 读 `SWK0`~`SWK3` 四行探针，确认 `kernel_map->max_offset` 是否被压到 `0xFC0000000` 量级 |
 
 ---
 
@@ -45,6 +45,9 @@
 | "停点位置漂移 = 硬件随机性" | 多处 | `0012` 补丁因 `corrupt patch` 被 CI 整份跳过，stage 10~31 标记**从未编进内核** |
 | "M6 已达成（早期虚拟内存与控制台交接）" | 里程碑报告 | 只达成 VM 侧；**console 接管未通**，已降级为"部分达成" |
 | "`#include <kern/printf.h>`" | 0085 初版 | 该头**不存在**，`kprintf` 声明在 `pexpert/pexpert/pexpert.h:233` |
+| "死点在 `initialize_screen` 的 `ml_io_map_unmappable`" | §13.3 | **已推翻**。真机实测 console 接管完全通过，一路跑到 `vm_swap_init`。当初误判是因为 stage 标记缺失、屏幕没有后续输出 |
+| "屏幕最后一行 = 死点" | §13 方法论 | **本环境 `panic()` 不终止系统**，打印完继续往下跑。必须找"本该出现却没出现的下一行" |
+| "`SWT In 6.1 0x...` 是死循环" | 本轮读屏 | 是 `0083` 对每个 `__startup_func` 的追踪（`SWT in <subsys>.<rank> <func>` / `SWT ok <func>`），底部重复几十行是正常的逐子系统初始化 |
 
 另附事实约束（不是结论，是环境限制）：
 - 本机 `xnu-src` 是**残缺快照**（缺 `config/MASTER.arm64.sweet` 等），只能对 `osfmk/`、`pexpert/` 做 `git apply --check` dry-run，**无法完整本地试跑补丁序列**。
@@ -53,34 +56,42 @@
 
 ---
 
-## 3. 当前死点的完整证据链（已交叉确证，不必重查）
+## 3. 当前进度与死点（真机实测，不必重查）
 
-`osfmk/arm/arm_init.c:516-571` 的真实调用顺序：
+### 3.1 已经跑通的链路（`cc9b9d2`，Run `42042712579` 实测）
 
 ```
-arm_vm_init()
-  → serial_init()
-  → startup_initialize_upto(STARTUP_SUB_KPRINTF)
+arm_vm_init → serial_init → startup_initialize_upto(KPRINTF)
   → kprintf("kprintf initialized")
   → kprintf("Serial mode specified: ...")
-  → PE_create_console()          ← 内部调用 initialize_screen()
+  → PE_create_console() / initialize_screen()        ← 已通过，不是死点
+  → SWEET EARLY 28..31 → machine_startup
+  → SWC32/SWC33 → kernel_bootstrap
+  → XNU Kernel Version 22.6.0 (root:xnu-8796.141.3)
+  → vm_map_bootstrap → vm_page_bootstrap(22701 free / 9811 wired pages)
+  → zone_bootstrap → vm_object_bootstrap → vm_map_init(73 maps / 153 entries)
+  → kmem_init → vm_swap_init("maximum number of VM swap files: 100")
 ```
 
-**重要**：屏幕停在第 3 行不是"很早死机"，而是 `arm_vm_init` + `serial_init` 都已成功，恰好死在 console 接管那一步。
+**M6 已完成**：console 接管、真 `kprintf` 上屏、VM 子系统五级初始化全部通过。
 
-`osfmk/console/video_console.c:2792+` 的 `initialize_screen()`，打印完 `b=FC800000 ...` 后立即执行：
+### 3.2 新死点
+
+```
+kmem_range_init: vm_map_locate_space failing for claim vm_ptr_range @vm_kern.c:3645
+```
+
+`kmem_scramble_ranges()` 把 kernel_map 切成 `vm_ptr_range` / `kmem_data_range` / `kmem_sprayqtn_range`，给第一段找连续 **VA** 时失败。空间计算在 `kmem_add_extra_claims()`：
 
 ```c
-newMapSize   = round_page(2640 * 4864);                    // ≈ 12.8MB
-newVideoVirt = ml_io_map_unmappable(0xfc800000, newMapSize, VM_WIMG_IO);
-gc_initialize(&vinfo);
-vc_progress_set();
-gc_enable();
+vm_map_sizes(kernel_map, NULL, NULL, &largest_free_size);
+largest_free_size -= total_claims;
+ptr_range_size = largest_free_size / ((kmem_ptr_ranges + 1) * 2);
 ```
 
-符号反查（`out/kernel.development.sweet.unstripped.yml`，73,277 个符号）得到 `initialize_screen+0xdc` 落在此处，与源码一致。
+**假设（正在验证）**：`0004` 补丁为过 `pmap.c:10988` 静态断言，把 `MACH_VM_MAX_ADDRESS_RAW` 压到 36-bit（`0xFC0000000`，63GB），而内核 VA 是 `0xFFFFFFF007...`（≈1.8×10¹⁹）。若 `VM_MAX_KERNEL_ADDRESS` 由它推导，则 `min_offset > max_offset`，可用空间为 0。
 
-**这与 §11 修过的 "no PTE" panic 是同一族根因**：`sweet_fbcon` 已占 16MB，这里再要 12.8MB，早期 I/O 的 L3 页表池可能耗尽——区别在于这次没有 panic 出口，表现为静默冻结。
+**验证手段**：`0087` 的 `SWK0`~`SWK3` 四个探针，见 §7。
 
 ---
 
@@ -126,14 +137,30 @@ python3 ~/unixnu-pagani/tools/auto_boot_pipeline.py --sha <commit>
 
 ## 7. 下一步该做什么（精确到文件）
 
-1. 在 `osfmk/console/video_console.c` 的 `ml_io_map_unmappable` **调用前**插 `SWE04`、**返回后**插 `SWE05`。
-2. 单变量构建 → 真机 → 读屏：
-   - 停在 `SWE04`：死在这条映射调用内部；
-   - 过了 `SWE05` 才停：死在 `gc_initialize` / `vc_progress_set` / `gc_enable`。
-3. 若确认死在映射本身，两条修复路线（**优先 B**）：
-   - **A 扩容**：`osfmk/arm64/arm_vm_init.c` 继续放大早期 I/O L3 池（现为 `va_l1_end += (64 << 20)`），覆盖 16MB + 12.8MB 叠加；
-   - **B 复用**：让 `initialize_screen` 直接复用 `sweet_fbcon` 已建立的 16MB 映射（`v_info` 指向既有 VA），从根上消除第二次映射。
-4. console 接管成功后：`arm_init()` 返回 → `machine_startup(&BootCpuData)` → Thread 0 接管 → 冲 M7 `kernel_bootstrap`。
+### 7.1 当前这一轮：读 `SWK0`~`SWK3`
+
+`0087-sweet-kmem-range-probe.patch` 已在 `osfmk/vm/vm_kern.c` 插入四个探针：
+
+| 标记 | 位置 | 读数 |
+| :--- | :--- | :--- |
+| `SWK0` | `vm_map_sizes(kernel_map,...)` 之后 | `min_offset` / `max_offset` / 最大空洞 |
+| `SWK1` | `largest_free_size -= total_claims` 之后 | claims 总量 / 剩余 / claim 数 |
+| `SWK2` | 三段尺寸算完 | `ptr` / `data` / `spray` 各要多少 |
+| `SWK3` | 每个 claim 的 `locate` 之前 | claim 名 / size / 当前 start |
+
+### 7.2 按读数分支
+
+- **`SWK0` 的 max 是 `fc0000000` 量级**（远低于 min `ffffffe000...`）→ 根因确认。修法：不要继续调大 `MACH_VM_MAX_ADDRESS`，改为修 `_COMM_PAGE64_BASE_ADDRESS` 一侧，让 `pmap.c:10988` 断言自然成立，使 `MACH_VM_MAX_ADDRESS` 保持 47-bit。
+- **`SWK2` 出现天文数字**（如 `ffffffff...`）→ `largest_free_size -= total_claims` 无符号下溢，说明 kernel_map 真空洞小于 claims 总量。修法同上，先修 max_offset。
+- **`SWK0`/`SWK2` 都正常但 `SWK3` 的 size 巨大** → claim 尺寸计算错，重点查 `kmem_ptr_ranges` 与 `sane_size` 的取值。
+
+### 7.3 通过之后
+
+`kernel_bootstrap` 剩余阶段跑完 → `bsd_init` → 8 核 PSCI（M8）→ UFS/ramdisk（M9）→ launchd（M10）。
+
+### 7.4 顺手该修的（不阻塞主线）
+
+`SWT in X.2147483647` 说明某条 `__startup_func` 描述的 `rank` 未初始化（`INT_MAX` 哨兵）。且 `SWT` 输出淹了半屏，建议进入 `kernel_bootstrap` 后关掉，恢复读屏信噪比。
 
 ---
 

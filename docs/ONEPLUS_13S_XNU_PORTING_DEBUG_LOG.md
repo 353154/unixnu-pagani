@@ -554,12 +554,14 @@ v4（`23e7859`）在两处补标记（x=180 深青 = isb 存活，x=220 深品�
 > **手机**：fastboot 序列号 `3B1F67EA9BBUHK76`，仅 `fastboot boot`（严禁 flash/erase），挂死=长按电源重启
 > **屏幕分辨率** 1216×2640，stride 4864；控制台/检测带布局见 §7 与 `~/Desktop/SCREEN_READ_PROMPT.md`
 
-### 8.1 当前进度快照（2026-11-05 22:15 刷新，**本节为唯一权威状态，旧版本内容已作废**）
-- **已攻克**（按序）：OSLAR_EL1 UD → WXN/A → C=0→C=1 → CSE 致命性 → TG1/TG0 粒度真相（`TGran16==0`，Oryon 只认 4KB）→ **原生 4KB 全量内核**（`__ARM_16K_PG__` 关闭 + `MACH_VM_MAX_ADDRESS` 断言修复）→ **`T1SZ=16` 四级 KVA 页表** → TTBR0 销毁/TTBR1 接管 → `arm_vm_init` + `pmap_bootstrap` 完整跑通（Stage 20）→ **XNU 真实 `kprintf` 日志上屏**
-- **当前死点（已用符号反查 + 源码交叉确证，不要重新猜）**：`initialize_screen()` 内 `ml_io_map_unmappable(0xfc800000, 12.8MB, VM_WIMG_IO)` 及其紧随的 `gc_initialize/vc_progress_set/gc_enable`。屏幕停在 `initialize_screen: b=FC800000, w=000004C0, h=00000A50, r=00001300, d=00000002` 之后，详见 **§13.3**
-- **重大认知修正**：`0012` 补丁因 `corrupt patch at line 100` 长期被 CI 跳过 → stage 10~31、`sweet_early_map_final()`、`+64MB` 早期 I/O 池**此前根本没编译进去**。曾经的"停点漂移"是补丁缺失导致的假象，不是硬件随机性。详见 **§12.2**
-- **路线**：M6 收尾（console 接管）→ M7 `kernel_bootstrap`/Thread 0 → M8 8 核 PSCI → M9 UFS/ramdisk → M10 launchd
-- **最新提交/构建**：`cc9b9d2` / Run `42042712579`（`0083`+`0084`+`0085`+`0086` 与真·`0012` 同时在场的第一版）
+### 8.1 当前进度快照（2026-11-05 22:35 刷新，**本节为唯一权威状态，旧版本内容已作废**）
+- **已攻克**（按序）：OSLAR_EL1 UD → WXN/A → C=0→C=1 → CSE 致命性 → TG1/TG0 粒度真相（`TGran16==0`）→ 原生 4KB 全量内核 → `T1SZ=16` 四级 KVA 页表 → TTBR0 销毁/TTBR1 接管 → `arm_vm_init` + `pmap_bootstrap` → **console 接管（`initialize_screen` 通过）** → **XNU 真实 `kprintf` 上屏** → **`machine_startup` → `kernel_bootstrap` → VM 子系统五级初始化（页表/zone/vm_map/kmem/swap）**
+- **当前死点（真机实测，见 §14.2）**：`kmem_range_init: vm_map_locate_space failing for claim vm_ptr_range @vm_kern.c:3645`。这是 **kernel_map 虚拟空间**分配问题，与物理内存布局无关
+- **正在验证**：`0087` 的四探针 `SWK0`~`SWK3`（commit `d3c06d7`）。核心假设：`0004` 把 `MACH_VM_MAX_ADDRESS_RAW` 压到 36-bit（`0xFC0000000`），可能牵连 `kernel_map->max_offset`，导致 `min > max`
+- **两条方法论修正（务必遵守）**：① 本环境 `panic()` **不终止**系统，屏幕最后一行 ≠ 死点；② `SWT` 是 `__startup_func` 追踪，不是死循环标记
+- **历史认知修正**：`0012` 曾因 `corrupt patch` 被 CI 整份跳过，stage 10~31 标记从未编进内核 —— 此前所有"停点漂移""死在 `initialize_screen`"的判断均源于此（见 §12.2 / §13 勘误）
+- **路线**：M6 已完成 → M7 `kernel_bootstrap` 收尾（当前卡点）→ M8 8 核 PSCI → M9 UFS/ramdisk → M10 launchd
+- **最新提交/构建**：`d3c06d7` / Run `42045809346`
 
 ### 8.2 调试循环（每轮 ~15 分钟，已全自动）
 1. **改补丁必须单变量**：`0012`（早期控制台/stage 标记）、`0083`（汇编可见化）、`0084`（GIC 打点）、`0085`（console 接管打点）、`0086`（大红数字）各管一段，勿混改
@@ -805,6 +807,11 @@ gc_enable();
 ```
 与符号反查（`out/kernel.development.sweet.unstripped.yml`，73,277 个符号）得到的 `initialize_screen+0xdc` 完全吻合。**即：`ml_io_map_unmappable` 请求 12.8MB 的新映射，而早期 I/O L3 页表池在 `sweet_fbcon`(16MB) + 本轮新映射(12.8MB) 的双重压力下可能已耗尽——这与 §11 修过的"no PTE"panic 是同一族根因，只是这次没有 panic 出口，表现为静默冻结。**
 
+> **【勘误 · 2026-11-05 22:25，本节结论已被真机推翻】**
+> 这不是死点。真机实测（`cc9b9d2`，Run `42042712579`）显示 `initialize_screen` **完全通过**，内核一路跑到 `machine_startup` → `kernel_bootstrap` → `vm_swap_init`。当初之所以看起来"停在 `initialize_screen`"，是因为 `0012` 的 stage 标记缺失（见 §12.2），屏幕没有后续输出可看，于是把"最后一行"误当成了"死点"。
+> **教训：`kprintf` 的最后一行 ≠ 死点。必须在每个可疑调用前后成对插标记，用「后一个标记是否出现」来判定，而不能用「最后一个标记出现在哪」。**
+> 真正的新死点见 §14。
+
 ##### 13.4 本轮已排除的嫌疑（不要再重复怀疑）
 - boot-args 随机性（`startup_debug=0x1` 反而更早停 → 参数确实改变执行路径，已回退基线对照）；
 - framebuffer 踩内核内存（ADT 中 fb 与 RAM 区间不重叠）；
@@ -820,4 +827,71 @@ gc_enable();
 2. 读屏顺序：**大红数字（阶段号）→ `SWDxx`/`SWExx` 行 → 底部色带**，三者交叉验证；
 3. 若确认停在 `SWE00`/`initialize_screen` 之间，则下一步直接在 `video_console.c` 的 `ml_io_map_unmappable` **前后各插一个 SWE 标记**，把"请求映射"与"映射返回"分开——二者之间即为最终死点；
 4. 若落在该调用，修复方向：在 `arm_vm_init.c` 再扩早期 I/O L3 池，或让 `initialize_screen` 复用 `sweet_fbcon` 已建立的 16MB 映射（`v_info` 直接指向既有 VA），避免二次映射。
+
+#### 14. 里程碑式跨越：console 接管完成，内核跑通 VM 子系统，新死点锁在 `kmem_range_init`（2026-11-05 22:22）
+
+##### 14.1 实测屏幕序列（`cc9b9d2`，Run `42042712579` 产物）
+
+```
+SWC08 sre_ready
+SWEET EARLY 28: PE_init_cpu done
+SWEET EARLY 29: fiq_context_init done
+SWEET EARLY 30: arm_props set in chosen
+SWEET EARLY 31: entering machine_startup
+SWEET EARLY PANIC: kmem_range_init: vm_map_locate_space failing for claim vm_ptr_range @vm_kern.c:3645
+SWC32 machine_conf done
+SWC33 kernel_bootstrap in
+XNU Kernel Version 22.6.0: Mon Aug 14 05:06:07 UTC 2023; root:xnu-8796.141.3
+kernel_bootstrap: vm_map_bootstrap
+vm_page_bootstrap: 22701 free pages, 9811 wired pages, (up to 0 of which are delayed free)
+vm_page_bootstrap: zone_bootstrap / vm_object_bootstrap / vm_map_init
+map_bootstrap: 73 maps, 153 entries and 128 holes available
+vm_page_bootstrap: kmem_init
+maximum number of VM swap files: 100
+```
+
+**判定：M6 正式完成。** `initialize_screen` / `PE_create_console` 全部通过，XNU 版本号打印，页表 → zone → vm_map → kmem → swap 五级初始化依次执行。项目首次真正进入 **C 语言内核世界深处**。
+
+##### 14.2 新死点（唯一硬事实）
+
+```
+kmem_range_init: vm_map_locate_space failing for claim vm_ptr_range @vm_kern.c:3645
+```
+
+`kmem_scramble_ranges()`（`osfmk/vm/vm_kern.c`）把 kernel_map 切成 `vm_ptr_range` / `kmem_data_range` / `kmem_sprayqtn_range` 三段，为第一段找连续 VA 时失败。**这是虚拟地址空间问题，与物理内存布局无关。**
+
+##### 14.3 两条方法论修正（比结论本身更重要）
+
+1. **本环境的 `panic()` 不终止系统。** 证据：`PANIC` 行之后仍打印出 `vm_swap_init` 的 `maximum number of VM swap files: 100`。`halt_all_cpus` 路径在此环境下失效，panic 打印完就继续往下跑。
+   → **屏幕最后一行不再等于死点**；必须找"本该出现但没出现的下一行"。
+2. **`SWT` 不是死循环标记。** `0083` 的 `SWT in <subsystem>.<rank> <func>` / `SWT ok <func>` 是对每个 `__startup_func` 的追踪，屏幕底部几十行重复是正常的子系统逐个初始化。附带发现：出现过 `SWT in 5.2147483647`，`rank` 为 `INT_MAX` 哨兵，说明某条 startup 描述的 rank 未初始化（真 bug，待后续修）。
+   副作用：`SWT` 输出淹没了半屏，读屏信噪比很差。
+
+##### 14.4 根因假设与验证补丁 `0087`
+
+`0087-sweet-kmem-range-probe.patch`（`d3c06d7`）在空间计算链路上插四个探针：
+
+| 标记 | 位置 | 读数 |
+| :--- | :--- | :--- |
+| `SWK0` | `vm_map_sizes(kernel_map,...)` 之后 | kernel_map 的 `min_offset` / `max_offset` / 最大空洞 |
+| `SWK1` | `largest_free_size -= total_claims` 之后 | claims 总量、剩余、claim 数量 |
+| `SWK2` | 三段尺寸计算完 | `ptr` / `data` / `spray` 各要求多少 VA |
+| `SWK3` | 每个 claim 的 `locate` 之前 | claim 名、size、当前 start |
+
+**假设**：`0004` 补丁为过 `pmap.c:10988` 静态断言，把 `MACH_VM_MAX_ADDRESS_RAW` 从 47-bit 压到 36-bit（`0xFC0000000`，63GB）。而内核 VA 是 `0xFFFFFFF007...`（≈1.8×10¹⁹）。若 `VM_MAX_KERNEL_ADDRESS` 在本平台由 `MACH_VM_MAX_ADDRESS` 推导，则 `min_offset > max_offset`，可用空间为 0 —— 这能解释"`assert` 反而能过、`locate` 却失败"的反常组合。
+
+**若 `SWK0` 的 max 确为 `fc0000000` 量级**，修法不是继续调大这个数，而是改 `_COMM_PAGE64_BASE_ADDRESS` 侧：让 4KB 布局的 comm page 地址落在断言允许范围内，从根上不再需要篡改用户空间上限。
+
+##### 14.5 外部建议评估（避免重复讨论）
+
+一位外部模型基于同一张屏幕给出了三条建议，逐条核对结论如下：
+
+| 建议 | 判定 | 理由 |
+| :--- | :--- | :--- |
+| 改 ADT，修 `failed to find the interrupt-controller` | **不适用** | 该报错来自 Apple 自家 `io_arm_spi_mark_interrupt_controller`（Apple 键盘/触控 SPI 驱动），本机无此硬件，属预期噪音。中断控制器早由 `0084` 打通：`SWC02 gicd_va` / `SWC03 gicr_va size=0x100000` / `SWC05 wake` / `SWC07 spi_enabled` / `SWC08 sre_ready`。且我们喂给 XNU 的是 `mkadt.py` 合成的 Apple ADT（12,788B），不是 Android DTB，"DTB 格式不兼容"前提不成立 |
+| 调物理内存基址 / 避开保留区 | **方向错误** | `vm_map_locate_space` 操作的是**虚拟**地址；物理侧已健康（22701 free + 9811 wired pages，与 127MB ADT 吻合） |
+| 加 `-v keepsyms=1 debug=0x100` 查 KASLR | **已实测排除** | sweet 未启用 KASLR；`0x100` 是 x86 `DB_KPRT` 位；此前加 `startup_debug=0x1` 实测**反而更早停**，已回退 |
+
+唯一被采纳的判断：「XNU 强依赖 Apple 格式设备树」——这点正确，但本项目三周前已用 `mkadt.py` 解决，属已完成项。
+
 
