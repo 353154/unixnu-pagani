@@ -1099,6 +1099,9 @@ using 462 buffer headers and 462 cluster IO buffer headers
 
 **新死点**：`bsd_init()` 内部、`mbinit()` 之后（屏幕上 `using 462 buffer headers` 是最后一条）。之所以之前完全看不见内部进度，是因为 `bsd/kern/bsd_init.c:493` 的 `#define DEBUG_BSDINIT 0` 把 `bsd_init_kprintf` 编成了空宏。`0093` 改为 1，之后每一步都会有 `bsd_init: calling xxx`。
 
+> ⚠️ 勘误（2026-11-06 00:40）：本条里「`mbinit()` 之后」「`using 462 buffer headers` 是 mbinit 的输出」**两处都写错了**。真相见 §14.12：`using 462 buffer headers` 由 `bsd_bufferinit()`（`bsd_init.c:681`）内部调用 `bufinit()`（`bsd/vfs/vfs_bio.c:2220`）打印，而 `mbinit()` 在 `bsd_init.c:705`，**排在 `IOKitInitializeTime`（687）和 `vfsinit`（691）之后**。当时因为 `DEBUG_BSDINIT` 还是 0、看不到 `calling` 行，就把"最后一条输出"直接对到了错误的下一个调用上。教训：日志关掉时用"最后一行输出"反推调用位置，必须去源码核对打印点，不能凭函数名相邻关系推断。
+
+
 预期下一关是 `vfs_mountroot()` 找不到根设备（`bsd_init` 后半段是 `while (TRUE)` 重试挂根）。**正解是准备 ramdisk，不是改代码绕过**。
 
 ### 14.11 事故：同一提交被重复引导一次（2026-11-06 00:20~00:29，提交 `231550f`）
@@ -1122,3 +1125,66 @@ using 462 buffer headers and 462 cluster IO buffer headers
 | 引导结果判定 | 解析 `fastboot boot` 输出，无 `OKAY`/`Booting` 记为 `boot_failed`（返回码 5），不再无条件当作成功 |
 
 **方法论**：这类事故的成本不在当次，而在"证据白丢一轮"——而一轮的固定成本是 8 分钟构建 + 一次真机重启 + 用户两次拍照。凡是"重复执行不会报错、只会静默覆盖证据"的操作，都必须先有台账再谈自动化。
+
+### 14.12 `0093` 实测：`bsd_init` 走到 `IOKitInitializeTime` 后停止（00:20 引导，提交 `231550f`）
+
+屏幕（上下两张拼接后）实际出现的 `bsd_init` 序列：
+
+```
+SWV3 entering bsd_init
+Copyright (c) 1982, 1986, 1989, 1991, 1993
+The Regents of the University of California. All rights reserved.
+
+bsd_init: calling kauth_init
+bsd_init: calling process_name
+bsd_init: calling get_bsdthread_info
+MAC Framework successfully initialized
+bsd_init: calling kauth_cred_create
+bsd_init: calling chgproccnt
+bsd_init: calling kmem_suballoc
+bsd_init: calling bsd_bufferinit
+using 462 buffer headers and 462 cluster IO buffer headers
+bsd_init: calling IOKitInitializeTime
+```
+
+**`DEBUG_BSDINIT=1` 生效**，`bsd_init` 内部第一次变得可见。此后再无 `calling vfsinit`，所以卡点在 `IOKitInitializeTime()` 内部。
+
+**判读陷阱（本轮差点误判）**：屏幕中部还有一段看着"更像最新"的输出：
+
+```
+SWEET: starting device-tree platform expert
+SWEET: platform expert registered
+SWEET AKS: AppleKeyStore registered (no passcode, unlocked)
+SWEET WDT: IOWatchdog registered (accepts check-ins, never fires)
+SWEET SURF: IOCoreSurfaceRoot registered
+SWEET HID: buttons registered / touch registered
+SWEET BATTERY: static fallback, 100% 4200mV external=1 charging=0
+SWEET FB: AppleCLCD 1216x2640 stride 4864 at 0xfc800000, default surface 1, presented as 1216x2640
+```
+
+它出现在 `calling IOKitInitializeTime` **之后**，很容易被当成"已经过了这一关、卡在 FB"。**这是错的**：`SWEET FB: ... presented as ...` 是 `AppleCLCD::start()` 的最后一句（`0061-sweet-iphone-x-display-size.patch:54`，紧跟 `registerService()`），而 `start()` 只能在 IOKit 匹配阶段执行，也就是 `bsd_init` **之前**。它是上/前一段的输出被环形缓冲推到此处，属于残留像素。
+
+**根因**（`iokit/Kernel/IOStartIOKit.cpp:73`）：
+
+```c
+void IOKitInitializeTime( void ) {
+	mach_timespec_t t; t.tv_sec = 30; t.tv_nsec = 0;
+#ifndef BCM2837
+	IOService::waitForService( IOService::resourceMatching("IORTC"), &t );
+#endif
+	clock_initialize_calendar();
+}
+```
+
+本平台没有 RTC 驱动，`IORTC` 永远匹配不到；`IOService::waitForService` 内部走 `SLEEPNOTIFYTO(&result, deadline)`，要等 30 秒的绝对时间 deadline。**内核不是崩溃，而是在等一个永远不会出现的服务。**
+
+**待验证（未定论）**：为什么 30 秒 deadline 没有把它叫醒。两种可能，`0094` 的 `SWT1..SWT4` 一次就能分开：
+
+| 可能 | 表现 |
+| :--- | :--- |
+| deadline 睡眠能正常超时，只是我们拍照时理解错了位置 | `SWT2`/`SWT3`/`SWT4` 全出现，且后面继续打 `calling vfsinit` |
+| 定时器中断没把线程唤醒（`SLEEPNOTIFYTO` 永不返回） | 只有 `SWT1`，无 `SWT2`。这会是个更大的问题：所有基于 deadline 的睡眠都会挂住 |
+
+**方法论**：OCR 把 `SWEET` 读成了 `MEET`，我差点按错误前缀去 `grep`，什么也找不到。修正方式是从产物内核 `strings` 反查真实字符串——`SWEET PRNG: HMAC-SHA256 registered` 一出现，前缀就确定了。**照片里的字符串一律先在内核里核一遍再用。**
+
+下一轮：`0094`（提交 `fcb0a59`）跳过 IORTC 等待，并在前后埋 `SWT1`（进入）/`SWT2`（跳过）/`SWT3`（calendar 前）/`SWT4`（calendar 后），每个都带 `mach_absolute_time` 读数。

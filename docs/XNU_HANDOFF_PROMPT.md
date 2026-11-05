@@ -6,7 +6,7 @@
 > 项目：OnePlus 13s (`pagani` / SM8750 / Oryon 8 核) 移植 Apple XNU `xnu-8796.141.3`
 > 运行环境：Gunyah Hypervisor NS-EL1
 > 仓库：`~/unixnu-pagani`（GitHub `353154/unixnu-pagani`，main）
-> 最后更新：2026-11-06 00:33（`0093` 已在真机运行待拍照；本轮补上「引导幂等 + 台账」与「长命令必须可观测」两条纪律，见 §1 铁律 2、§9.2）
+> 最后更新：2026-11-06 00:42（`0093` 实测到 `bsd_init: calling IOKitInitializeTime`；根因是等一个不存在的 `IORTC`，`0094` 已下发；同时更正 `buffer headers` 归属错误）
 >
 > **交接时只需移交本文件一份**（见下方「移交清单」）。不要整份粘贴 DEBUG_LOG。
 >
@@ -40,14 +40,14 @@ ls xnu/patches/ | tail -5                            # 最近加了什么探针
 
 | 项 | 值 |
 | :--- | :--- |
-| 当前阶段 | **M7 已达成（2026-11-06 00:06 实测）**：`kernel_bootstrap` 跑完，`bsd_init()` 已进入，打出了 BSD 版权行、`MAC Framework successfully initialized`、`using 462 buffer headers`。死点移进 BSD 子系统内部 |
-| 最新内核提交 | `231550f`（`0093` 打开 `DEBUG_BSDINIT`），**已在真机运行、屏幕待拍照** |
-| 最新构建 | `231550f` / Run `61` **success**（00:19），`bsd_init: calling` 在产物中命中 70 次 |
-| 最新引导 | `231550f` 于 00:20 合成镜像并引导；台账见 `out/boot_history.jsonl`（**同 sha 不再重复引导**） |
-| 屏幕最后一行 | 上一轮（`f2d805e`）是 `using 462 buffer headers and 462 cluster IO buffer headers`；本轮 `0093` 应在其后打出 `bsd_init: calling ...` |
-| 死点 | `bsd_init()` 内部、`mbinit()` 之后。`DEBUG_BSDINIT` 原为 0，内部日志全被编译掉——`0093` 已打开，直接看最后一条 `bsd_init: calling ...` |
-| 已确认根因（前三关） | ① `zones` 索取 128GB VA 致 kmem claims 下溢（`0089`，已解）；② video console 用未映射的 `vinfo.v_baseaddr` 绘制（`0090`，已解）；③ `kperf_init_early` → `ml_wait_max_cpus()` 永久睡眠，因为置位 `max_cpus_initialized` 的 `ml_set_max_cpus()` 只被 IOKit 的 `AppleARMSMP`/`IOCPU` 调用，而这两个驱动不存在（`0092` 自行放开闸门，已解） |
-| 下一步动作 | 读 `bsd_init: calling xxx` 的最后一条定位卡点；大概率会撞到 `vfs_mountroot()` 找不到根设备——`bsd_init` 后半段是 `while(TRUE)` 重试挂根，**准备 ramdisk 是这一关的正解，不是救火** |
+| 当前阶段 | **M7 已达成；M9 已开局（2026-11-06 00:20 实测）**：`bsd_init()` 进入并连续跑过 `kauth_init` → `process_name` → `kauth_cred_create` → `kmem_suballoc` → `bsd_bufferinit`（打出 `using 462 buffer headers`），停在 `calling IOKitInitializeTime` |
+| 最新内核提交 | `fcb0a59`（`0094` 跳过 IORTC 等待 + `SWT1..SWT4` 探针），**构建中** |
+| 最新构建 | `231550f`（`0093`）/ Run `61` success，已实测；`fcb0a59` 的 Run 待查 |
+| 最新引导 | `231550f` 00:20 引导（`0093` 实测）；台账 `out/boot_history.jsonl`，**同 sha 不再重复引导** |
+| 屏幕最后一行 | `bsd_init: calling IOKitInitializeTime` —— 之后没有任何 `calling vfsinit` |
+| 死点 | `IOKitInitializeTime()` 内部（`iokit/Kernel/IOStartIOKit.cpp:73`）：第一句 `waitForService(resourceMatching("IORTC"), 30s)`，本平台无 RTC 驱动，服务永不出现，`SLEEPNOTIFYTO` 的 deadline 睡眠不返回。**不是崩溃，是睡着了** |
+| 已确认根因（前四关） | ① `zones` 索取 128GB VA 致 kmem claims 下溢（`0089`）；② video console 用未映射的 `vinfo.v_baseaddr` 绘制（`0090`）；③ `kperf_init_early` → `ml_wait_max_cpus()` 永久睡眠，置位者 `ml_set_max_cpus()` 只被不存在的 IOKit CPU 驱动调用（`0092`）；④ `IOKitInitializeTime` 等不存在的 `IORTC`（`0094`，待验证） |
+| 下一步动作 | 读 `SWT1`~`SWT4`：`SWT2` 缺 = deadline 睡眠根本没醒（定时器中断有问题，比 RTC 更大）；四个都出现且随后有 `calling vfsinit` = 这一关已过，继续看 `bsd_init` 后续。再往后就是 `vfs_mountroot()` 找不到根设备，**准备 ramdisk 是正解，不是救火** |
 
 ---
 
@@ -87,6 +87,8 @@ ls xnu/patches/ | tail -5                            # 最近加了什么探针
 | "屏幕上方还印着 `vnguard_policy_init` / `PE: platform expert registered`，说明本轮已跑过这些" | 23:35 读屏 | **不成立**。FB 控制台（`0003` 的 `fbcon_*`）是**环形缓冲**：写满 `fbcon_rows`（2640/32 = 82 行）后绕回顶部覆盖，且上一轮的像素不会被清干净。所以屏幕上同时存在"本轮旧位置"和"上轮残留"两种行。**判进度只认编号单调递增的新标记**（如 `SWP3`），不认行位置 |
 | "`kernel_map->max_offset` 被 `0004` 压到 `0xFC0000000`，空间为 0" | §14.4 | **已推翻**。`SWK0` 实测 `max=ffffffff...`，是 64 位顶端量级。真因是 `claims ≈ 140.7GB` 撑爆可用空间后**减法下溢**（§14.6）。误判原因：只看编译期宏，没等运行时读数就写进了主叙事 |
 | "claims 是某项 `kc_calculate_sz` 按物理内存算歪了" | §14.6 | **已推翻**。`zones` 的 128GB 是**编译期常量** `ZONE_MAP_VA_SIZE`（MacOSX 分支），根本没有运行时计算参与。误判原因：看到「13 项平均 10.8GB」就假设是计算错误，没先查注册点的尺寸来源 |
+| "`using 462 buffer headers` 是 `mbinit` 的输出，死点在 `mbinit` 之后" | §14.10 | **顺序写反了**。该行由 `bsd_bufferinit()`（`bsd_init.c:681`）→ `bufinit()`（`vfs_bio.c:2220`）打印；`mbinit()` 在 705 行，排在 `IOKitInitializeTime`(687) 和 `vfsinit`(691) **之后**。误判原因：日志宏被关掉时用"最后一行输出"直接对到了下一个调用，没去源码核打印点 |
+| "屏幕上的 `SWEET FB: ... presented as 1216x2640` 是本轮最新输出，所以卡在 FB" | 00:33 读屏 | **不成立**。它是 `AppleCLCD::start()` 的收尾日志（`0061` 补丁第 54 行，紧跟 `registerService()`），而 `start()` 只可能在 `bsd_init` **之前**的 IOKit 匹配阶段执行。出现在 `calling IOKitInitializeTime` 之后纯属环形缓冲残留。另外 OCR 把 `SWEET` 读成了 `MEET`，差点按错前缀 grep——**照片里的字符串先用产物内核 `strings` 核一遍** |
 
 另附事实约束（不是结论，是环境限制）：
 - 本机 `xnu-src` 是**残缺快照**（缺 `config/MASTER.arm64.sweet` 等），只能对 `osfmk/`、`pexpert/` 做 `git apply --check` dry-run，**无法完整本地试跑补丁序列**。
@@ -227,34 +229,50 @@ python3 ~/unixnu-pagani/tools/auto_boot_pipeline.py --sha $(git rev-parse --shor
 
 ## 7. 下一步该做什么（精确到文件）
 
-### 7.1 当前这一轮：在 `bsd_init` 内部定位（`0093` 已打开日志）
+### 7.1 当前这一轮：验证 `0094` 是否把 `IOKitInitializeTime` 推过去
 
-`kernel_bootstrap` 那段已经收工，不要再回头验证 `SWP`/`SWV`。现在的位置是 `bsd_init()` 内部、`mbinit()` 之后。
+`0093` 已实测到位：`bsd_init` 内部日志全部出现，最后一条是 `calling IOKitInitializeTime`，此后没有 `calling vfsinit`。
 
-之前看不见的原因很简单：`bsd/kern/bsd_init.c:493` 有 `#define DEBUG_BSDINIT 0`，它把 `bsd_init_kprintf` 定义成空宏，**内部每一步的日志都被编译掉了**。`0093` 把它改成 1，于是全程会打印 `bsd_init: calling xxx`。
+`0094`（`fcb0a59`，`iokit/Kernel/IOStartIOKit.cpp`）跳过 `waitForService(resourceMatching("IORTC"), 30s)`——本平台没有 RTC 驱动，这个服务永远不会出现——并埋了四个带时间戳的探针：
 
-判读：**屏幕最后一条 `bsd_init: calling xxx` 就是卡点。** 注意 FB 是环形缓冲（82 行），`bsd_init` 日志量大，很可能绕回覆盖，务必拍上下两张。
+| 标记 | 位置 | 出现代表 |
+| :--- | :--- | :--- |
+| `SWT1` | 函数入口 | 进了 `IOKitInitializeTime` |
+| `SWT2` | 跳过 RTC 等待之后 | 没有卡在服务等待上 |
+| `SWT3` | `clock_initialize_calendar()` 之前 | 走到了日历初始化 |
+| `SWT4` | `clock_initialize_calendar()` 之后 | 这一关整体通过 |
+
+判读按最大编号走：
+
+- **只有 `SWT1`、无 `SWT2`** → 说明 RTC 那段根本不是死因（或者补丁没进内核），要回去看 `MARK SWT2` 是否为负。
+- **`SWT1`+`SWT2`、无 `SWT3`** → 两者之间有别的等待，需在中间再二分。
+- **`SWT1`~`SWT4` 全有、随后出现 `calling vfsinit`** → 这一关通过，继续往下看。
 
 `bsd_init()` 的关键序列（行号对 `bsd/kern/bsd_init.c`）：
 
 | 行 | 调用 | 状态 |
 | :--- | :--- | :--- |
 | 570 | `mac_policy_initbsd()` | ✅ 已过（`MAC Framework successfully initialized`） |
-| 700 | `mcache_init()` | ✅ 已过 |
-| 706 | `mbinit()` | ✅ 已过（`using 462 buffer headers...`） |
+| 681 | `bsd_bufferinit()` | ✅ 已过（内部 `bufinit()` 打出 `using 462 buffer headers`） |
+| 687 | `IOKitInitializeTime()` | 🔴 **当前死点**：等不存在的 `IORTC` |
+| 691 | `vfsinit()` | ❓ |
+| 705 | `mbinit()` | ❓ |
 | 713 | `audit_init()` | ❓ |
 | 720 | `knote_init()` | ❓ |
-| 724 | `eventhandler_init()` | ❓ |
 | 728 | `aio_init()` | ❓ |
 | 856 | `inittodr(0)` | ❓ |
 | 868 | `setconf()` | ❓ 选根设备 |
 | 870 | `vfs_mountroot()` | ❓ 挂根，失败会进 `while (TRUE)` 无限重试 |
 
+> ⚠️ 顺序易错点：`IOKitInitializeTime`（687）在 `vfsinit`（691）**之前**，而 `mbinit`（705）在两者**之后**。`using 462 buffer headers` 是 `bsd_bufferinit` → `bufinit()`（`bsd/vfs/vfs_bio.c:2220`）打印的，**不是** `mbinit`。§14.10 里那句写错了，已插勘误。
+
 ### 7.2 按结果分支
 
-- **卡在 `vfs_mountroot`** → 这是预期中最可能的结果。没有根设备，它会清空 `rootdevice` 再重试，并 `printf` 错误信息。**正解是提供 ramdisk，不是改代码绕过**——这不是 bug，是缺少运行时依赖。
+- **`SWT4` 出现且随后打 `calling vfsinit`** → `IOKitInitializeTime` 过关。继续跟 `bsd_init` 往下，下一站大概率是 `vfs_mountroot()` 找不到根设备。
+- **卡在 `vfs_mountroot`** → 预期中最可能的结果。没有根设备，它会清空 `rootdevice` 再重试并打印错误。**正解是提供 ramdisk，不是改代码绕过**——这不是 bug，是缺少运行时依赖。
 - **卡在 `mbinit` 与 `vfs_mountroot` 之间的某个 init** → 逐个看该函数是否依赖不存在的驱动/资源（`audit_init` 依赖 kauth、`knote_init` 依赖 kqueue zone、`aio_init` 依赖 workqueue）。
 - **完全看不到 `bsd_init: calling`** → `0093` 没进内核，看流水线 `MARK bsd_init: calling` 是否为负。
+
 
 ### 7.3 通过之后
 
