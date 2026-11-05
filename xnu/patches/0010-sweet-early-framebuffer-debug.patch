@@ -1,5 +1,5 @@
 diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
-index e26a1d7..5ab0fb1 100644
+index e26a1d7..9553135 100644
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
 @@ -56,6 +56,7 @@
@@ -10,16 +10,22 @@ index e26a1d7..5ab0fb1 100644
  #include <arm/pmap.h>
  #include <arm/caches_internal.h>
  #include <arm/cpu_internal.h>
-@@ -346,6 +347,20 @@ arm_init(
+@@ -346,6 +347,26 @@ arm_init(
  	DTEntry chosen = NULL;
  	unsigned int dt_entry_size = 0;
  
 +#if defined(SWEET)
 +	{
 +		volatile uint32_t *fb = (volatile uint32_t *)(uintptr_t)(0xfc800000 + 520 * 4864 + 400 * 4);
-+		for (unsigned int y = 0; y < 40; y++) {
-+			for (unsigned int x = 0; x < 40; x++) {
++		for (unsigned int y = 0; y < 60; y++) {
++			for (unsigned int x = 0; x < 60; x++) {
 +				fb[y * (4864 / 4) + x] = 0xffffaa00u;
++			}
++		}
++		volatile uint32_t *fb2 = (volatile uint32_t *)(uintptr_t)(0xfc800000 + 520 * 4864 + 480 * 4);
++		for (unsigned int y = 0; y < 60; y++) {
++			for (unsigned int x = 0; x < 60; x++) {
++				fb2[y * (4864 / 4) + x] = 0xffff00ffu;
 +			}
 +		}
 +		__asm__ volatile("dsb sy" ::: "memory");
@@ -31,7 +37,7 @@ index e26a1d7..5ab0fb1 100644
  	arm_setup_pre_sign();
  
  	arm_slide_rebase_and_sign_image();
-@@ -362,6 +377,7 @@ arm_init(
+@@ -362,6 +383,7 @@ arm_init(
  #endif /* defined(HAS_APPLE_PAC) */
  
  	PE_init_platform(FALSE, args); /* Get platform expert set up */
@@ -39,7 +45,7 @@ index e26a1d7..5ab0fb1 100644
  
  #if __arm64__
  	configure_timer_apple_regs();
-@@ -423,6 +439,7 @@ arm_init(
+@@ -423,6 +445,7 @@ arm_init(
  #endif
  
  	ml_parse_cpu_topology();
@@ -47,7 +53,7 @@ index e26a1d7..5ab0fb1 100644
  
  
  	master_cpu = ml_get_boot_cpu_number();
-@@ -453,11 +470,13 @@ arm_init(
+@@ -453,11 +476,13 @@ arm_init(
  	 */
  	thread->machine.preemption_count = 0;
  	cpu_bootstrap();
@@ -61,7 +67,7 @@ index e26a1d7..5ab0fb1 100644
  
  	/*
  	 * Initialize the timer callout world
-@@ -466,6 +485,7 @@ arm_init(
+@@ -466,6 +491,7 @@ arm_init(
  
  	cpu_init();
  
@@ -69,7 +75,7 @@ index e26a1d7..5ab0fb1 100644
  	processor_bootstrap();
  
  	if (PE_parse_boot_argn("maxmem", &maxmem, sizeof(maxmem))) {
-@@ -513,6 +533,7 @@ arm_init(
+@@ -513,6 +539,7 @@ arm_init(
  	__builtin_arm_wsr("pan", 1);
  #endif  /* __ARM_PAN_AVAILABLE__ */
  
@@ -99,7 +105,7 @@ index d89b0f1..d0c710d 100644
  
  	flush_mmu_tlb();
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index ccbb188..8a9f413 100644
+index ccbb188..143ddb0 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
 @@ -212,6 +212,62 @@ LEXT(ResetHandlerData)
@@ -260,9 +266,9 @@ index ccbb188..8a9f413 100644
 +
 +	/*
 +	 * L2 Block 3..6: VA 0xfffffe0006000000..0x0dffffff (128MB) -> PA 0xb0000000
-+	 * Memory attribute: Normal Write-Back, Inner Shareable, Access Flag, Valid Block
++	 * Memory attribute: Normal Write-Back, Outer Shareable, Access Flag, Valid Block
 +	 */
-+	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_INNER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITEBACK) | ARM_TTE_BLOCK_AF)
++	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITEBACK) | ARM_TTE_BLOCK_AF)
 +	MOV64	x12, 0xb0000000
 +	orr		x13, x11, x12
 +	str		x13, [x10, #(3 * 8)]
@@ -303,7 +309,7 @@ index ccbb188..8a9f413 100644
  
  	b		common_start
  
-@@ -741,9 +895,57 @@ common_start:
+@@ -741,9 +895,59 @@ common_start:
  #endif /* HAS_APPLE_PAC */
  
  	// Enable caches, MMU, ROP and JOP
@@ -334,6 +340,8 @@ index ccbb188..8a9f413 100644
 +	 * shows its slot color + ESR/FAR bit bands instead of a silent hang. */
 +	adrp	x0, EXT(sweet_exc_vectors)@page
 +	add		x0, x0, EXT(sweet_exc_vectors)@pageoff
++	add		x0, x0, x22
++	sub		x0, x0, x23
 +	msr		VBAR_EL1, x0
 +	isb		sy
 +
@@ -361,7 +369,7 @@ index ccbb188..8a9f413 100644
  
  #if !VMAPPLE && !defined(SWEET)
  	MOV64   x1, SCTLR_EL1_DEFAULT
-@@ -794,6 +996,69 @@ common_start:
+@@ -794,6 +998,65 @@ common_start:
  	add		x0, x20, x22
  	sub		x0, x0, x23
  
@@ -419,11 +427,7 @@ index ccbb188..8a9f413 100644
 +	mov		x7, x10
 +	MOV64	x1, (0xfc800000 + 1080 * 4864 + 100 * 4)
 +	bl		Lsweet_exc_bits
-+	/* KVA data-plane probe: read kernel entry page via TTBR1 (safe read test) */
-+	MOV64	x2, 0xfffffe000748b488
-+	ldr		x3, [x2]
-+	SWEET_BIG 660, 100, 0xff00ff88		// KVA data read survived (big spring block)
-+	/* Restore arm_init target (lr) and boot_args KVA (x0) */
++	/* Restore arm_init target (lr) and boot_args KVA (x0) and jump to arm_init */
 +	mov		lr, x27
 +	mov		x0, x28
 +#endif
@@ -431,7 +435,7 @@ index ccbb188..8a9f413 100644
  #if KASAN
  	mov	x20, x0
  	mov	x21, lr
-@@ -867,6 +1132,105 @@ arm_init_tramp:
+@@ -867,6 +1130,105 @@ arm_init_tramp:
  	/* Return to arm_init() */
  	ret
  

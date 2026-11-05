@@ -9,7 +9,6 @@ import zipfile
 import io
 
 LOG_FILE = "/Users/damon/unixnu-pagani/build_status.log"
-RUN_ID = "41903882061"
 
 def log(msg):
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -24,7 +23,27 @@ def get_token():
     except Exception:
         return ""
 
-log(f"\n=== 切换监控目标: Run #{RUN_ID} ===")
+def push_wechat(msg):
+    try:
+        py_path = "/Users/damon/.hermes/installs/8c379330277d6bde/environments/a5231383ca1545bd8892d6f2844e56e5/venv/bin/python"
+        script = "/Users/damon/unixnu-pagani/scripts/wxpush.py"
+        if os.path.exists(py_path) and os.path.exists(script):
+            subprocess.run([py_path, script, msg], timeout=10)
+    except Exception as e:
+        log(f"微信通知失败: {e}")
+
+token = get_token()
+headers = {"Authorization": f"token {token}", "User-Agent": "Python"} if token else {"User-Agent": "Python"}
+
+if len(sys.argv) > 1:
+    RUN_ID = sys.argv[1]
+else:
+    req = urllib.request.Request("https://api.github.com/repos/353154/unixnu-pagani/actions/runs?per_page=1", headers=headers)
+    with urllib.request.urlopen(req) as resp:
+        data = json.loads(resp.read().decode())
+        RUN_ID = str(data["workflow_runs"][0]["id"])
+
+log(f"\n=== 启动自动心跳监控: Run #{RUN_ID} ===")
 
 while True:
     try:
@@ -87,8 +106,10 @@ while True:
                                     "--out-dir", "/Users/damon/unixnu-pagani/out"
                                 ], check=True)
                                 log("✅ test-boot.img 重新合成成功！")
+                                push_wechat("✅ OnePlus 13s XNU v13 镜像已自动下载并打包完毕 (out/test-boot.img)，可随时 fastboot boot！")
                 else:
                     log(f"❌ 构建结束，结果为: {conclusion}")
+                    push_wechat(f"❌ XNU 构建结束，结果为: {conclusion}")
                 break
     except Exception as e:
         log(f"监控异常: {e}")

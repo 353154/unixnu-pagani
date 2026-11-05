@@ -480,6 +480,24 @@ v4（`23e7859`）在两处补标记（x=180 深青 = isb 存活，x=220 深品�
 3. 将 KVA 数据读取探针（`0xfffffe000748b488`）移入 `common_start`，成功存活即亮 660 行 60×60 翠绿大块；
 4. 随后 `ret` 直奔 `arm_init`，跨越汇编/C 边界，点亮 CP6 橙色方块与早期控制台。
 
+### 7.20 v14 决战冲刺：解密 v13 硬件读数、修正 VBAR_EL1 与 Shareability、直通 arm_init (2026-11-05 14:30)
+
+**v13 真机读屏铁证与彻底解码**：
+- **Row 1**: `TCR_EL1 = 0xa511a511` (TG1=2 标准 16K, T0SZ/T1SZ=17)
+- **Row 2**: `TTBR1 = 0xb1180000` (指向 KVA L1 根表)
+- **Row 3**: `L1 Desc = 0xb1188003` (指向 KVA L2 表 `0xb1188000`, Table=1, Valid=1)
+- **Row 4**: `L2 Desc = 0xb0000701` (**铁证实锤！手写注入 PA 0xb0000000 成功生效！**)
+
+**核心问题与 v14 终极修正**：
+1. **移除阻断性 `ldr` 探针**：
+   `0xfffffe000748b488` 是只读代码段入口（`__start`），在平坦映射下已预取入 L1 I-Cache。平坦映射下用数据加载指令 `ldr` 交叉访问引发 I/D-Cache 冲突或总线等待。4 排位带已 100% 验证页表链，无需阻断性数据读。
+2. **修正 VBAR_EL1 为合法 KVA**：
+   此前 `msr VBAR_EL1, x0` 写入的是平坦物理地址 `0xb148e000`，MMU 开启后异常取指走 TTBR0。修改为 `+ x22 - x23` 转换为合法 KVA `0xfffffe000748e000`。
+3. **匹配页表 Shareability 为 Outer-Shareable**：
+   `TCR_EL1` 指定 `SH1 = 10` (Outer Shareable)，将 L2 Block 描述符的 `SH_INNER_MEMORY` 修改为 `SH_OUTER_MEMORY`，严格保持 SoC CMN 总线一致性。
+4. **直通 `ret` 击穿进入 `arm_init`**：
+   在 `common_start` 恢复 `lr` 与 `x0` 后直接 `ret`，PC 跨越汇编/C 边界，点亮 `arm_init` 开头的 60×60 亮橙方块与亮粉方块！
+
 ---
 
 ## 8. 交接手册（换模型/新会话请先读本节）
