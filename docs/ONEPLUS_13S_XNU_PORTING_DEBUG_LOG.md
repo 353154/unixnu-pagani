@@ -437,6 +437,12 @@ v4（`23e7859`）在两处补标记（x=180 深青 = isb 存活，x=220 深品�
 | 翠绿亮、品红不亮 | 数据通、I 侧取指挂（I-TLB/属性） | 检查 KVA L2 条目 XN/attr |
 | 双亮、仍无 arm_init | 冻在 `ret arm_init` 目标页 | 核查 arm_init 页的 KVA 映射覆盖 |
 
+### 7.17 v12 攻坚记录 (2026-11-05 09:10)
+
+- **改动策略**：在 `start.s` 的 SWEET 路径中（MMU 开启与 DC CIVAC 清理前），显式手写 KVA L1[0x7e0] 指向 KVA L2 表（`x25 + 3*PGBYTES`），并在 KVA L2 中写入 Block 3..6（涵盖 `0xfffffe0006000000..0x0dffffff`，共 128MB，映射至物理内存 `0xb0000000`），属性使用 Inner-Shareable, Normal Write-Back, Access Flag=1。
+- **验证**：汇编通过 `clang -c -arch arm64` 校验无语法与立即数越界问题；`git apply --check` 校验通过。
+- **目标**：彻底修复 KVA L2 块描述符错位导致的 XPU 防火墙总线冻结，打通 `0xfffffe000748b488` 数据读探针并直冲 `arm_init`。
+
 ---
 
 ## 8. 交接手册（换模型/新会话请先读本节）
