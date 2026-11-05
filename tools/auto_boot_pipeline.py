@@ -79,6 +79,18 @@ def sh(c):
     return subprocess.run(c, shell=True, capture_output=True, text=True).stdout.strip()
 
 
+def sh_all(c):
+    """合并 stdout+stderr。
+
+    只给 fastboot boot 用：fastboot 的报错走 stderr，而 sh() 只取 stdout，
+    于是在设备刚重枚举、命令立即失败的情况下会拿到空字符串——2026-11-06
+    00:48 那次就是这样把一次（很可能成功的）引导判成了 BOOT FAILED。
+    其余命令不能改用这个：device_visible() 依赖"stderr 为空才算看见设备"。
+    """
+    r = subprocess.run(c, shell=True, capture_output=True, text=True)
+    return (r.stdout + r.stderr).strip()
+
+
 # ── 引导台账 ────────────────────────────────────────────────────────────────
 # 2026-11-06 00:29 教训：同一提交 231550f 被引导了两次。原因是脚本既不记录
 # "这个 sha 已经 boot 过"，也没有任何可查痕迹，于是"看到 CI success 就再跑一次"
@@ -108,6 +120,8 @@ def log_boot(event, sha, **extra):
     os.makedirs(os.path.dirname(BOOT_LOG), exist_ok=True)
     with open(BOOT_LOG, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())        # 引导途中进程可能被杀，必须落盘
     print("LEDGER", json.dumps(rec, ensure_ascii=False), flush=True)
     return rec
 
@@ -118,6 +132,31 @@ def device_visible():
     if st in ("device", "recovery", "sideload"):
         return True
     return bool(sh("fastboot devices"))
+
+
+# 引导的终态事件。boot_start 不是终态——它表示"已经动手了，但结果没写回来"，
+# 典型原因是 fastboot 途中进程被杀、Ctrl-C、或机器睡眠。
+# boot_unconfirmed 也是终态：确实发出了引导、设备也确实离开了 fastboot，
+# 只是没有回显可读。它必须和 booted 一样拦住重复引导——再引导一次就会盖掉
+# 一个很可能正停在屏幕上的结果。
+BOOT_DONE = ("booted", "boot_unconfirmed", "boot_failed")
+
+
+def boot_state(sha7):
+    """返回 (state, record)：done / started / None。
+
+    started 是最危险的中间态：上一次已经发出引导、但没留下结果，说明屏幕上
+    可能正停着一个没人读过的画面。这种情况不能当"没引导过"处理。
+    """
+    recs = [r for r in read_boot_log() if r.get("sha") == sha7]
+    if not recs:
+        return None, None
+    last = recs[-1]
+    if last.get("event") in BOOT_DONE:
+        return "done", last
+    if last.get("event") == "boot_start":
+        return "started", last
+    return "other", last
 
 
 
@@ -235,16 +274,22 @@ def main():
         log_boot("staged", sha, mode="no-boot")
         return 0
 
-    # ── 幂等闸门（2026-11-06 00:29 新增）────────────────────────────────
+    # ── 幂等闸门（2026-11-06 00:29 新增，00:50 加 boot_start 中间态）──────
     # 同一提交已引导过就不再碰设备。这是为了防止"看到构建成功就再跑一遍"，
     # 把上一次还没读的停屏画面覆盖掉。
-    done = [r for r in read_boot_log()
-            if r.get("sha") == sha[:7] and r.get("event") == "booted"]
-    if done and "--force" not in sys.argv:
-        last = done[-1]
+    state, last = boot_state(sha[:7])
+    if "--force" not in sys.argv and state == "done" and \
+            last["event"] in ("booted", "boot_unconfirmed"):
         print(f"ALREADY BOOTED {last['sha']} at {last['at']} —— 跳过", flush=True)
         print("同一提交已引导过，不重复引导。确认要重跑请加 --force。", flush=True)
         return 0
+    if "--force" not in sys.argv and state == "started":
+        print(f"BOOT STARTED but never confirmed: {last['sha']} at {last['at']}", flush=True)
+        print("上次已经发出引导，但没有写回结果（进程被中断/被杀）。", flush=True)
+        print("屏幕上很可能正停着一个没人读过的画面 → 先拍照，别重跑。", flush=True)
+        print("确认那屏已经作废、要重新引导，请加 --force。", flush=True)
+        return 6
+    # boot_failed 属于可重试状态：失败不写 booted，闸门自然放行。
 
     # ── 设备可见性预检（2026-11-06 00:29 新增）──────────────────────────
     # 旧版在设备两边都不可见时会干等 20×3s + 240×3s ≈ 12 分钟才报错，期间
@@ -285,21 +330,44 @@ def main():
     if not sent:
         print("adb not ready, assuming device may already be in fastboot", flush=True)
 
+    # 动手之前先落一行 boot_start。这一个记录的价值在于：引导中途被中断时，
+    # 下一次运行会看到"已开始、未确认"，而不是"从没引导过"，于是会先要求
+    # 拍照确认，而不是直接又盖一次屏。
+    log_boot("boot_start", sha, serial=SERIAL,
+             dispatched="adb_reboot_bootloader" if sent else "assumed_already_fastboot")
+
     for i in range(240):
         dev = sh("fastboot devices")
         if dev:
             print("FASTBOOT", dev, flush=True)
-            out = sh(f"fastboot boot {os.path.join(ROOT, 'out/test-boot.img')}")
-            print(out, flush=True)
-            ok = "OKAY" in out or "Booting" in out
-            print("BOOTED" if ok else "BOOT FAILED", time.strftime("%H:%M:%S"), flush=True)
-            log_boot("booted" if ok else "boot_failed", sha,
-                     serial=SERIAL,
+            out = sh_all(f"fastboot boot {os.path.join(ROOT, 'out/test-boot.img')}")
+            print(out or "(fastboot 无任何输出)", flush=True)
+            stamp = time.strftime("%H:%M:%S")
+
+            if "OKAY" in out or "Booting" in out:
+                verdict = "booted"
+            elif not out:
+                # 空输出不能直接判失败。设备刚重枚举时 fastboot 可能已经把内核
+                # 交出去、随即离开 fastboot 模式，此时命令没有任何回显。
+                # 判据是设备还在不在 fastboot：走了说明内核接手了。
+                time.sleep(3)
+                gone = not sh("fastboot devices")
+                verdict = "boot_unconfirmed" if gone else "boot_failed"
+                print("  空输出 · 设备已离开 fastboot（内核应已接手）" if gone
+                      else "  空输出 · 设备仍停在 fastboot（引导确实没发生）", flush=True)
+            else:
+                verdict = "boot_failed"
+
+            label = {"booted": "BOOTED",
+                     "boot_unconfirmed": "BOOTED (unconfirmed)",
+                     "boot_failed": "BOOT FAILED"}[verdict]
+            print(label, stamp, flush=True)
+            log_boot(verdict, sha, serial=SERIAL,
                      image_mtime=time.strftime(
                          "%H:%M:%S", time.localtime(
                              os.path.getmtime(os.path.join(ROOT, "out/test-boot.img")))),
-                     out=out.replace("\n", " | ")[:200])
-            return 0 if ok else 5
+                     out=out.replace("\n", " | ")[:200] or "(empty)")
+            return 0 if verdict != "boot_failed" else 5
         # 60 秒还没出现：可能 reboot 没生效，或手机停在 Android，重发一次
         if i and i % 20 == 0:
             if adb_ready():

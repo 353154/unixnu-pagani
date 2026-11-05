@@ -26,6 +26,12 @@ if ! git diff --quiet -- xnu/patches 2>/dev/null; then
     echo "WARN: xnu/patches/ 有未提交改动，本次只提交 docs/，补丁请另行提交"
 fi
 
+# 0.5 刷新状态卡里的「台账快照」行（只写客观事实：HEAD / Run / 引导记录）
+#     手写的「最新内核提交」「最新构建」两行不动——那里面有判断，机器写不出来。
+if [ -f tools/refresh_status.py ]; then
+    python3 tools/refresh_status.py || echo "WARN: 状态快照刷新失败，继续"
+fi
+
 # 1. 归档副本
 mkdir -p "$ARCHIVE"
 for f in "${DOCS[@]}"; do
