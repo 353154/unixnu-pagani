@@ -1,0 +1,70 @@
+--- a/osfmk/vm/vm_init.c
++++ b/osfmk/vm/vm_init.c
+@@ -90,7 +90,9 @@
+ static inline void
+ vm_mem_bootstrap_log(const char *message)
+ {
+-//	kprintf("vm_mem_bootstrap: %s\n", message);
++#if defined(SWEET)
++	kprintf("vm_mem_bootstrap: %s\n", message);
++#endif
+ 	kernel_debug_string_early(message);
+ }
+ 
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -221,8 +221,12 @@
+ static inline void
+ kernel_bootstrap_log(const char *message)
+ {
++#if defined(SWEET)
++	if (startup_phase >= STARTUP_SUB_KPRINTF) {
++#else
+ 	if ((startup_debug & STARTUP_DEBUG_VERBOSE) &&
+ 	    startup_phase >= STARTUP_SUB_KPRINTF) {
++#endif
+ 		kprintf("kernel_bootstrap: %s\n", message);
+ 	}
+ 	kernel_debug_string_early(message);
+@@ -231,8 +235,12 @@
+ static inline void
+ kernel_bootstrap_thread_log(const char *message)
+ {
++#if defined(SWEET)
++	if (startup_phase >= STARTUP_SUB_KPRINTF) {
++#else
+ 	if ((startup_debug & STARTUP_DEBUG_VERBOSE) &&
+ 	    startup_phase >= STARTUP_SUB_KPRINTF) {
++#endif
+ 		kprintf("kernel_bootstrap_thread: %s\n", message);
+ 	}
+ 	kernel_debug_string_early(message);
+@@ -400,14 +408,28 @@
+ 	assert(startup_phase < upto);
+ 
+ 	while (cur < startup_entries_end && cur->subsystem <= upto) {
++#if defined(SWEET)
++		if (startup_phase >= STARTUP_SUB_KPRINTF &&
++		    cur->subsystem <= STARTUP_SUB_ZALLOC) {
++			kprintf("SWT in %d.%d %p\n", cur->subsystem, cur->rank,
++			    cur->func);
++		}
++#else
+ 		if ((startup_debug & STARTUP_DEBUG_VERBOSE) &&
+ 		    startup_phase >= STARTUP_SUB_KPRINTF) {
+ 			kprintf("%s[%d, rank %d]: %p(%p)\n", __func__,
+ 			    cur->subsystem, cur->rank, cur->func, cur->arg);
+ 		}
++#endif
+ 		startup_phase = cur->subsystem - 1;
+ 		kernel_startup_log(cur->subsystem);
+ 		cur->func(cur->arg);
++#if defined(SWEET)
++		if (startup_phase >= STARTUP_SUB_KPRINTF &&
++		    cur->subsystem <= STARTUP_SUB_ZALLOC) {
++			kprintf("SWT ok %p\n", cur->func);
++		}
++#endif
+ 		startup_entry_cur = ++cur;
+ 	}
+ 	kernel_startup_log(upto);
