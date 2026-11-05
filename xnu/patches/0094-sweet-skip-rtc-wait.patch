@@ -1,0 +1,31 @@
+--- a/iokit/Kernel/IOStartIOKit.cpp
++++ b/iokit/Kernel/IOStartIOKit.cpp
+@@ -73,21 +73,26 @@
+ IOKitInitializeTime( void )
+ {
+ 	mach_timespec_t         t;
++	IOLog("SWT1 iokit_time enter t=%llu\n", mach_absolute_time());
+ 
+ 	t.tv_sec = 30;
+ 	t.tv_nsec = 0;
+ 
+ // RTC is not present on this target
+ #ifndef BCM2837
+-	IOService::waitForService(
+-		IOService::resourceMatching("IORTC"), &t );
++	/* SWEET(0094): no IORTC provider exists on this hardware. Waiting 30 s
++	 * for a service that can never appear hangs bsd_init outright, because
++	 * the deadline sleep needs a timer interrupt to wake up. Skip it. */
++	IOLog("SWT2 rtc wait skipped\n");
+ #endif
+ #if defined(__i386__) || defined(__x86_64__)
+ 	IOService::waitForService(
+ 		IOService::resourceMatching("IONVRAM"), &t );
+ #endif
+ 
++	IOLog("SWT3 before calendar t=%llu\n", mach_absolute_time());
+ 	clock_initialize_calendar();
++	IOLog("SWT4 calendar done t=%llu\n", mach_absolute_time());
+ }
+ 
+ void
