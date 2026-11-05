@@ -1371,3 +1371,44 @@ sweetfb_noconsole=1 sweetfb_hz=30
 1. **无 PAC 是硬门槛**：iPhone X 是最后一代无 PAC 的机器，所以所有项目都停在 iOS 16 / iPhone X；Pixel 6（Tensor）与 Galaxy S7（Exynos 8890）的尝试都失败。
 2. **SEP 缺失**：没有 Secure Enclave，Apple ID / App Store / FairPlay 直接退出（`fairplayd` 起不来），这不是驱动问题。
 3. **闭源固件**：蜂窝基带、蓝牙固件、充能握手都在厂商手里；上游至今插着电还在掉电。
+
+### 14.17 设备正名 + 发现同机型的成熟移植：建议切换路线（2026-11-06 01:35）
+
+**正名。** 用户指出"我的设备就是一加 13T"。核对结果：一加 13T（国行 `PKX110`）与一加 13s（海外 `CPH2723`）是**同一台硬件**（`pagani` / SM8750 / 1216×2640），我们文档一直写海外名 "13s"，所以看起来像另一台机器。`README.md` 的 "OnePlus 13s (CPH2723)" 与用户口中的 13T 指的是同一块板，硬件层面没有分歧。
+
+**发现。** UniXNU（`github.com/UniXNU/UniXNU`，定位等同黑苹果的 OpenCore：通用 UEFI + 驱动加载框架 + SoC/设备分层仓库）的 `devices.toml` 里，`pagani`/SM8750 有**两个**条目，且都是 `record_state = available`：
+
+| 条目 | 仓库 | 说明 |
+| :--- | :--- | :--- |
+| `oneplus13t` | `IssacL04/UniXNU-Pagani_SM8750` | 主线，iPadOS 17.7.11 (21H461)，八核 + 触摸 + 显示 + Metal 流水线 |
+| `oneplus13t-shad0w23333` | `Shad0w23333/UniXNU-Pagani_SM8750`（分支 `oneplus13t-a830`） | **原生 Adreno 830 GPU 线** |
+
+该分支 `porting.toml` 的自述（原文）：*the native Adreno830 driver runs the iPadOS 17.7.11 desktop through Metal on hardware (system apps, widgets, Control Center); Wi-Fi, Bluetooth, audio, sensors and camera are implemented and host-tested but not yet booted; Data is a RAM disk.*
+
+已记录的实测（同机型、真机 `fastboot boot`）：
+- build 48 到 iPadOS UI；49 UFS 读超时 panic；50 锁屏 + 电源键；
+- 56–57 触摸（S3910 LBP / TouchComm v1，SPI `cs/word delay 50/0`，1.8 V + 3.1 V 电源轨）；
+- 59–63 八核全在线（`CPU reg=8 online=8 T=ff I=ff`）、单 pset 策略修掉 `thread_select` 递归锁、显示 vtable slot 345 修掉交接超时；
+- GPU Run 78 首次呈现（1039/1039 提交）、Run 90/91 颜色正确、525 MHz、28–40 次呈现/秒、无 CPU 回退。
+
+**与我们这条线的四点关键差异**
+
+| 维度 | 我们（ios-sweet 派生） | UniXNU pagani |
+| :--- | :--- | :--- |
+| 引导 | BootShim → Mach-O + ADT | UEFI 固件（EDK2 型）→ XNU，`BootPayloadDxe` 嵌入 payload，`embed_payload=true` 不可关 |
+| 页大小 | 16 KiB | **4 KiB**（苹果按 16K 设计，骁龙平台 4K，需专门补丁） |
+| 安全模型 | permissive AMFI + 沙箱策略 + AppleKeyStore 桩 | **AMFI / AppleImage4 原样保留**，用 IPSW 的 `StaticTrustCache`，需私有 platform seed |
+| 用户态 | iOS 16.7.16（iPhone X） | **iPadOS 17.7.11 (21H461)**（iPad7,1），Data 为 RAM seed |
+
+**结论与建议。** 这条 96 补丁的线**已在同一台机器上被公开实现超越**：对方不但过了 `bsd_init`/`skywalk`/`mountroot`，还做完了八核、触摸、显示和 GPU。继续在本仓库逐条打探针，边际价值很低。
+
+建议把主线切到 UniXNU pagani：以 `Shad0w23333/UniXNU-Pagani_SM8750`（`oneplus13t-a830`）为基线构建 → `fastboot boot` 验证，本仓库降级为参考与备份（其中 `sweet-log-pull.sh`、`mkadt.py` 等工具仍有交叉验证价值）。
+
+切换需要的输入（均可用官方/原厂来源取得，不涉及写分区）：
+1. 原厂固件 DTB（packaging 用，`dts/oneplus13t.dts` 不能替代）；
+2. 解压后的 21H461 `kernelcache`；
+3. `StaticTrustCache` / `Cryptex1,SystemTrustCache` bundle；
+4. RAM Data 镜像与非零 platform seed（seed 准备需 macOS，本机满足：Intel Mac + Xcode）；
+5. 构建工具链：LLVM、CMake、Ninja、dtc、OpenSSL、bison、flex、glslang、shaderc、SPIR-V Tools、rustup。
+
+**不做的事。** 对方目标根分区是一块 64 GiB 的 `unixnu` 分区（LUN 0，LBA 44928768–61705983）。我们**不建分区、不写分区**，只跑 RAM 版（`Data` 为 RAM seed，运行时不写盘），与本仓库铁律 §1 一致。
