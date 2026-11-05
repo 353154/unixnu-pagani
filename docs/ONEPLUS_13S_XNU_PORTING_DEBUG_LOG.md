@@ -1049,3 +1049,27 @@ SWD07 gc_acquired          ← 最后一行，之后无任何输出
 4. `bsd_init()` 之前打 `SWV3`——如果它出现，说明 `kernel_bootstrap` 全部跑完，M7 完成。
 
 判读：`SWV1` → 跳过生效；`SWV2` → 接管不是死点；`SWV3` → 进 `bsd_init`（M7 达成）；`SWV3` 不出现但 `SWV2` 出现 → 死点在 `vm_commpage_init` 到 `kernel_startup_initialize_upto(LAST)` 之间，范围已缩到很小。
+
+### 14.9 `0090` 真机实测（23:35:16 引导，提交 `651db40`）
+
+屏幕底部实际拍到的关键三行（下方无更多输出）：
+
+```
+SWD00 isc op=4 kmap=1
+SWV1 video console skipped serial=1 gboot=1 vbase=fffffff014f08000 depth=32
+SWV2 initialize_screen returned
+kernel_bootstrap: mac_policy_initmach
+```
+
+**结论一：`initialize_screen()` 不是死点。** `SWV2` 出现，说明 `0090` 的提前返回路径执行完毕并正常回到了 `startup.c`。§13.3 那条"死点在 `ml_io_map_unmappable`"彻底作废。
+
+**结论二：跳过 video console 是正确的。** `SWV1` 的三个读数：
+- `serial=1`——`console_is_serial()` 为真，`kprintf` 走 `PE_kputc` → `sweet_fbcon`，**完全不依赖 video console**，跳过是安全的；
+- `gboot=1`——`gc_graphics_boot` 已置位，`vcattach()` 不再重放 msgbuf；
+- `vbase=fffffff014f08000`——这是 `vinfo.v_baseaddr`。它既不是 FB 物理基址 `0xfc800000`，也不是本项目已建立的 FB 内核映射，**是一个未被 XNU 映射的地址**。video console 若拿它当像素指针逐字绘制，必挂。这条坐实了跳过的必要性，也是将来做真图形控制台时要先解决的第一个问题。
+
+**结论三：死点后移到 `mac_policy_initmach()`。** 它是 `SWV2` 之后第一个带 `kernel_bootstrap_log` 的调用，日志停在它。注意屏幕上方还印着 `vnguard_policy_init`、`PE: platform expert registered`、`sched_init` 等看起来"更靠后"的行——**那些是上一轮（0089，23:15）的像素残留，不是本轮的**。
+
+**方法论教训（已写入交接文档 §2）**：`0003` 的 `fbcon` 是环形缓冲，`fbcon_rows = 2640/32 = 82` 行，写满绕回顶部覆盖；且跨引导不会把上一轮像素清干净。所以**屏幕位置既不代表执行顺序，也不代表同一轮次**。以后一律用编号单调递增的标记判进度。
+
+下一轮：`0091`（提交 `0df72ad`）在尾巴每个调用点后打 `SWP1..SWP11`，取最大编号即卡点。

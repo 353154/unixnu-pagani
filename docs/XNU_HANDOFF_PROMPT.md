@@ -6,7 +6,7 @@
 > 项目：OnePlus 13s (`pagani` / SM8750 / Oryon 8 核) 移植 Apple XNU `xnu-8796.141.3`
 > 运行环境：Gunyah Hypervisor NS-EL1
 > 仓库：`~/unixnu-pagani`（GitHub `353154/unixnu-pagani`，main）
-> 最后更新：2026-11-05 23:10
+> 最后更新：2026-11-05 23:45（`0090` 实测：`SWV1`+`SWV2` 出现、`SWV3` 未出现，死点后移到 `mac_policy_initmach`）
 >
 > **交接时只需移交本文件一份**（见下方「移交清单」）。不要整份粘贴 DEBUG_LOG。
 >
@@ -40,13 +40,13 @@ ls xnu/patches/ | tail -5                            # 最近加了什么探针
 
 | 项 | 值 |
 | :--- | :--- |
-| 当前阶段 | **M7 接近完成**：`kmem_range_init` 已通过，`kernel_bootstrap` 跑到尾声（调度器/线程/IOKit 平台专家全部起来），卡在 console 接管之后 |
-| 最新内核提交 | `651db40`（`0090` 跳过 video console 接管 + `SWV1/2/3` 活体探针）；`36ce59d` 是 `0089`（已验证生效） |
-| 最新构建 | `36ce59d` / Run `42051760075` 已实测（23:15:39 引导）；`651db40` 构建中 |
-| 屏幕最后一行 | `SWD07 gc_acquired`（console 接管分支末尾），之后无任何输出 |
-| 死点 | `osfmk/console/video_console.c` 的 `initialize_screen()`，op=4 `kPEAcquireScreen`，调用点 `osfmk/kern/startup.c:709`。**它在函数内部是正常返回的**，死点在返回之后 |
-| 已确认根因（上一关） | `zones` 一项索取 **128GB** VA（`ZONE_MAP_VA_SIZE` 走了 MacOSX 分支），`kernel_map` 仅 48,365MB → 减法无符号下溢。改 24GB 后已解 |
-| 下一步动作 | 读 `SWV1/SWV2/SWV3`：确认跳过生效、`initialize_screen` 返回、是否进 `bsd_init` |
+| 当前阶段 | **M7 最后一段**：`initialize_screen` 已证实正常返回，`kernel_bootstrap` 尾巴只剩 `mac_policy_initmach` → `bsd_init` 这几个调用 |
+| 最新内核提交 | `0df72ad`（`0091` 在 `SWV2` 之后每个调用点后打 `SWP1..SWP11`）；`651db40`（`0090`）已实测 |
+| 最新构建 | `651db40` / Run `42054938305` 已实测（23:35:16 引导） |
+| 屏幕最后一行 | `kernel_bootstrap: mac_policy_initmach`（本轮真实最后一行；屏幕上更靠上的内容多为上轮残留，见 §2 末行） |
+| 死点 | `mac_policy_initmach()` 内部，或它返回后的 `vnguard_policy_init()`。**`initialize_screen()` 已被 `SWV2` 证明正常返回**，§13.3 的旧判断彻底作废 |
+| 已确认根因（前两关） | ① `zones` 索取 128GB VA 导致 kmem claims 下溢（`0089` 改 24GB，已解）；② video console 接管时用 `vinfo.v_baseaddr` 绘制即挂（`0090` 跳过，`SWV1` 实证 `serial=1` `vbase=fffffff014f08000`） |
+| 下一步动作 | 读 `SWP1..SWP11`，**编号最大的那个就是卡点**；出现 `SWP11` 说明 `kernel_bootstrap` 跑完，接着看 `SWV3`/`bsd_init` |
 
 ---
 
@@ -78,6 +78,7 @@ ls xnu/patches/ | tail -5                            # 最近加了什么探针
 | "死点在 `initialize_screen` 的 `ml_io_map_unmappable`" | §13.3 | **已推翻**。真机实测 console 接管完全通过，一路跑到 `vm_swap_init`。当初误判是因为 stage 标记缺失、屏幕没有后续输出 |
 | "屏幕最后一行 = 死点" | §13 方法论 | **本环境 `panic()` 不终止系统**，打印完继续往下跑。必须找"本该出现却没出现的下一行" |
 | "`SWT In 6.1 0x...` 是死循环" | 本轮读屏 | 是 `0083` 对每个 `__startup_func` 的追踪（`SWT in <subsys>.<rank> <func>` / `SWT ok <func>`），底部重复几十行是正常的逐子系统初始化 |
+| "屏幕上方还印着 `vnguard_policy_init` / `PE: platform expert registered`，说明本轮已跑过这些" | 23:35 读屏 | **不成立**。FB 控制台（`0003` 的 `fbcon_*`）是**环形缓冲**：写满 `fbcon_rows`（2640/32 = 82 行）后绕回顶部覆盖，且上一轮的像素不会被清干净。所以屏幕上同时存在"本轮旧位置"和"上轮残留"两种行。**判进度只认编号单调递增的新标记**（如 `SWP3`），不认行位置 |
 | "`kernel_map->max_offset` 被 `0004` 压到 `0xFC0000000`，空间为 0" | §14.4 | **已推翻**。`SWK0` 实测 `max=ffffffff...`，是 64 位顶端量级。真因是 `claims ≈ 140.7GB` 撑爆可用空间后**减法下溢**（§14.6）。误判原因：只看编译期宏，没等运行时读数就写进了主叙事 |
 | "claims 是某项 `kc_calculate_sz` 按物理内存算歪了" | §14.6 | **已推翻**。`zones` 的 128GB 是**编译期常量** `ZONE_MAP_VA_SIZE`（MacOSX 分支），根本没有运行时计算参与。误判原因：看到「13 项平均 10.8GB」就假设是计算错误，没先查注册点的尺寸来源 |
 
@@ -220,26 +221,33 @@ python3 ~/unixnu-pagani/tools/auto_boot_pipeline.py --sha $(git rev-parse --shor
 
 ## 7. 下一步该做什么（精确到文件）
 
-### 7.1 当前这一轮：验证 `0090` 是否把死点推过 `bsd_init`
+### 7.1 当前这一轮：用 `SWP1..SWP11` 定位 `kernel_bootstrap` 尾巴
 
-`0090-sweet-skip-video-console.patch`（提交 `651db40`）在 `initialize_screen()` 的 `kPEAcquireScreen` 分支开头直接返回，跳过整个 video console 接管；并在两个位置加了活体探针。
+`0090` 已验证：`SWV1`+`SWV2` 都出现、`SWV3` 没出现。所以 `initialize_screen()` 已正常返回，死点后移到 `mac_policy_initmach()` 附近——**这一关的结论已经拿到，不需要再验证 `0090`**。
 
-看三行，按出现与否分支：
+`0091-sweet-bootstrap-stage-probe.patch`（提交 `0df72ad`）在 `SWV2` 之后、每个调用点后面各打一行带序号的标记：
 
-| 标记 | 出现说明 | 不出现说明 |
+| 标记 | 位置 | 出现即证明 |
 | :--- | :--- | :--- |
-| `SWV1 video console skipped serial=..` | 跳过生效 | `0090` 没应用，或 op 不是 4 |
-| `SWV2 initialize_screen returned` | 接管**不是**死点 | 死点就在 `initialize_screen` 内部（与我们前面的推断矛盾，需重查） |
-| `SWV3 entering bsd_init` | `kernel_bootstrap` 跑完，**M7 达成** | 死点在 `vm_commpage_init` → `kernel_startup_initialize_upto(LAST)` 之间 |
+| `SWP1` / `SWP2` | `vm_commpage_init`+`vm_commpage_text_init` 前后 | commpage 两块都过了 |
+| `SWP3` | `mac_policy_initmach()` 之后 | MAC 框架 init 返回 |
+| `SWP4` | `vnguard_policy_init()` 之后 | vnguard 策略加载返回 |
+| `SWP5` | `dtrace_early_init()` 之后 | DTrace 早期初始化返回 |
+| `SWP6` | `load_static_trust_cache()` 之后 | 信任缓存加载返回 |
+| `SWP7` | `kernel_startup_initialize_upto(STARTUP_SUB_LOCKDOWN)` 之后 | 锁定期子系统全通 |
+| `SWP8` | `OSKextRemoveKextBootstrap()` 之后 | kext 引导段已剥离 |
+| `SWP9` | `machine_lockdown()` 之后 | 内核文本已只读化 |
+| `SWP10` | `PE_lockdown_iokit()` 之后 | IOKit 锁定完成 |
+| `SWP11` | `vm_set_restrictions()` 之后 | 尾巴跑完，下一句就是 `SWV3`/`bsd_init` |
 
-`SWV1` 里的 `vbase=` 还顺带给出 `vinfo.v_baseaddr`——若它与 `0xfc800000` 同级，说明 XNU 拿到的是物理地址当虚拟地址用，这正是之后要做真图形控制台时必须先解决的问题。
+**判读规则：屏幕上编号最大的那个 `SWP` 就是卡点。** 不要按行位置判断（见 §2 末行），FB 是环形缓冲。
 
 ### 7.2 按结果分支
 
-- **`SWV3` 出现** → M7 完成。下一步是 `bsd_init`：要准备 root ramdisk，否则会在 `bsd_init` 里因为找不到根设备而 panic 或卡住。这是 M9 的入口，提前把 ramdisk 方案想好。
-- **`SWV2` 出现、`SWV3` 不出现** → 死点在 `vm_commpage_init` / `mac_policy_initmach` / `dtrace` / `trust_cache` / `OSKextRemoveKextBootstrap` / `kernel_startup_initialize_upto(LAST)` 这几步之间。这六步已有 `kernel_bootstrap_log`，屏幕上一比就能定位。
-- **只有 `SWV1`、没有 `SWV2`** → 说明 `initialize_screen` 里还有别的路径会挂（例如 `pmap_remove` 或 `kmem_free` 分支），回到函数体内二分。
-- **一个 `SWV` 都没有** → 补丁没进内核。先看流水线的 `MARK SWV1` 是否为负。
+- **`SWP11` 出现** → `kernel_bootstrap` 尾巴全通，直接看 `SWV3` 是否出现：出现即 M7 达成，转 7.3；不出现则死点在 `vm_set_restrictions` 与 `bsd_init` 之间（只剩 `kperf_init_early`）。
+- **卡在 `SWP3` 之前** → `mac_policy_initmach()` 本身挂了。注意该函数源码只有 `load_security_extensions_function()` 和 `mac_late = 1` 两句，而该函数指针在 `security/mac_base.c` 里**没有任何赋值点**，正常应为 0。若真挂在这里，说明是别的东西（栈、异常向量、kprintf 重入），要单独一轮二分。
+- **卡在 `SWP3`→`SWP4`** → `vnguard_policy_init()` 内部。这是本项目首次进 MAC 策略的真实执行路径，值得优先怀疑 label 相关 zone/锁。
+- **一个 `SWP` 都没有** → `0091` 没进内核。看流水线 `MARK SWP1` 是否为负。
 
 ### 7.3 通过之后
 
