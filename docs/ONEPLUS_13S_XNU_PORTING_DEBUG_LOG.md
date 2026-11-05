@@ -554,17 +554,14 @@ v4（`23e7859`）在两处补标记（x=180 深青 = isb 存活，x=220 深品�
 > **手机**：fastboot 序列号 `3B1F67EA9BBUHK76`，仅 `fastboot boot`（严禁 flash/erase），挂死=长按电源重启
 > **屏幕分辨率** 1216×2640，stride 4864；控制台/检测带布局见 §7 与 `~/Desktop/SCREEN_READ_PROMPT.md`
 
-### 8.1 当前进度快照（2026-11-05 23:10 刷新，**本节为唯一权威状态，旧版本内容已作废**）
-- **已攻克**（按序）：OSLAR_EL1 UD → WXN/A → C=0→C=1 → CSE 致命性 → TG1/TG0 粒度真相（`TGran16==0`）→ 原生 4KB 全量内核 → `T1SZ=16` 四级 KVA 页表 → TTBR0 销毁/TTBR1 接管 → `arm_vm_init` + `pmap_bootstrap` → **console 接管（`initialize_screen` 通过）** → **XNU 真实 `kprintf` 上屏** → **`machine_startup` → `kernel_bootstrap` → VM 子系统五级初始化（页表/zone/vm_map/kmem/swap）**
-- **当前死点（真机实测，见 §14.2）**：`kmem_range_init: vm_map_locate_space failing for claim <name> @vm_kern.c:3645/3665`。这是 **kernel_map 虚拟空间**分配问题，与物理内存布局无关
-- **已确认根因（§14.7，`0088` 实测）**：`zones` claim 一项索取 **128GB** VA，而 `kernel_map` 最大空洞仅 **48,365MB** → `largest_free_size -= total_claims` 无符号下溢 → 所有 claim 的 size 变成 2⁶² 量级 → `locate` 必然失败。128GB 来自 `zalloc.c:164` 的 `ZONE_MAP_VA_SIZE`（**MacOSX 分支**）；同一份代码的 iOS 分支是 24GB
-- **正在验证**：`0089`（commit `36ce59d`）把该宏降到 24GB。预期 `claims` 134,178MB → ≈27,000MB，`free > claims`，不再 panic
-- **两条方法论修正（务必遵守）**：① 本环境 `panic()` **不终止**系统，屏幕最后一行 ≠ 死点；② `SWT` 是 `__startup_func` 追踪，不是死循环标记
-- **第三条方法论修正**：**大数十六进制不要靠照片读**，探针一律打印十进制 MB/GB
-- **第四条（本轮新增）**：`kmem_shuffle_claims()` 会随机打乱 claim 顺序，**panic 里的 claim 名每轮都可能不同**——这是 shuffle，不是硬件随机性，别把它当新线索
+### 8.1 当前进度快照（2026-11-05 23:25 刷新，**本节为唯一权威状态，旧版本内容已作废**）
+- **已攻克**（按序）：OSLAR_EL1 UD → WXN/A → C=0→C=1 → CSE 致命性 → TG1/TG0 粒度真相（`TGran16==0`）→ 原生 4KB 全量内核 → `T1SZ=16` 四级 KVA 页表 → TTBR0 销毁/TTBR1 接管 → `arm_vm_init` + `pmap_bootstrap` → console 接管 → **XNU 真实 `kprintf` 上屏** → `machine_startup` → `kernel_bootstrap` → VM 五级初始化 → **`kmem_range_init` 下溢（`0089` 修好）** → **调度器/线程/IOKit 平台专家/驱动注册全部起来**
+- **当前停点（23:15 实测，见 §14.8）**：`osfmk/kern/startup.c:709` 的 `initialize_screen(NULL, kPEAcquireScreen)` 之后。最后一条打印是 `SWD07 gc_acquired`，而 `vc_progress_set`/`gc_enable` 都正常返回，故死点在**返回之后**、`bsd_init` 之前
+- **正在验证**：`0090`（提交 `651db40`）——跳过 video console 接管，并打 `SWV1`/`SWV2`/`SWV3` 三个活体探针。`SWV3` 出现即 M7 达成
+- **四条方法论修正（务必遵守）**：① 本环境 `panic()` **不终止**系统，屏幕最后一行 ≠ 死点；② `SWT` 是 `__startup_func` 追踪，不是死循环标记；③ 大数十六进制不要靠照片读，探针一律打十进制；④ **屏幕行的顺序 ≠ 执行顺序**（两个绘制者共用同一块 framebuffer，会交错）
 - **历史认知修正**：`0012` 曾因 `corrupt patch` 被 CI 整份跳过，stage 10~31 标记从未编进内核 —— 此前所有"停点漂移""死在 `initialize_screen`"的判断均源于此（见 §12.2 / §13 勘误）
-- **路线**：M6 已完成 → M7 `kernel_bootstrap` 收尾（当前卡点）→ M8 8 核 PSCI → M9 UFS/ramdisk → M10 launchd
-- **最新提交/构建**：`36ce59d`（0089，构建中）；上一个实测版 `412a3cf` / Run `42049408576`
+- **路线**：M7 `kernel_bootstrap` 收尾（当前卡点）→ M9 `bsd_init`/ramdisk → M8 8 核 PSCI → M10 launchd
+- **最新提交/构建**：`651db40`（0090，构建中）；上一个实测版 `36ce59d` / Run `42051760075`
 
 ### 8.2 调试循环（每轮 ~15 分钟，已全自动）
 1. **改补丁必须单变量**：`0012`（早期控制台/stage 标记）、`0083`（汇编可见化）、`0084`（GIC 打点）、`0085`（console 接管打点）、`0086`（大红数字）各管一段，勿混改
@@ -1002,3 +999,53 @@ KMEM_RANGE_REGISTER_STATIC(zones, &zone_map_range, ZONE_MAP_VA_SIZE);
 - `zone_meta_size`、`vm_submap_size`、`zone_init()` 的 `remaining_size` 都按 VA_SIZE 重新计算，会自动跟随。
 
 **遗留问题**：为什么本构建走 MacOSX 分支？这才是配置层面的根本问题。但把 `XNU_PLATFORM_MacOSX` 整体改成 0 会牵连 kext 模型、驱动加载路径等大量行为，不能与本次单宏修复混在一轮。**先过 kmem，再评估是否整体切 iOS 平台配置。**
+##### 14.8 `0089` 生效：`kmem_range_init` 通过，内核跑进 `kernel_bootstrap` 尾声（2026-11-05 23:15）
+
+`36ce59d` / Run `42051760075`，引导 23:15:39（流水线首次全自动完成 `reboot bootloader` → `fastboot boot`）。产物 16,735,456 字节，与上一版**完全相同**——`0089` 只改常量，不改代码路径，所以尺寸不能作为生效证据，只能看屏幕。
+
+**结果：`kmem_range_init` 的 panic 消失了。** 屏幕内容从「VM 初始化」一路推进到 `kernel_bootstrap` 后段，可见（按屏幕自上而下）：
+
+```
+kernel_bootstrap: mac_policy_initmach / vnguard_policy_init / dtrace_early_init
+kernel_bootstrap: trust_cache_init  → SWEET: trust caches unavailable (Image4/AMFI not installed)
+kernel_bootstrap: OSKextRemoveKextBootstrap / machine_lockdown
+kernel_bootstrap: kernel_do_post - done / PE_lockdown_iokit
+SWEET: starting device-tree platform expert / platform expert registered
+SWEET RKS: AppleKeyStore registered (no passcode, unlocked)
+SWEET WDT: IOWatchdog registered (accepts check-ins, never fires)
+SWEET SURF: IOCoreSurfaceRoot registered
+SWEET HID: buttons registered / SWEET HID: touch registered
+SWEET BATTERY: static fallback, 100% 4200mV external=1 charging=0
+SWEET FB: AppleCLCD 1216x2640 stride 4864 at 0xfc800000, default surface 1, presented as 1216x2640
+kernel_bootstrap: sched_init / Scheduler: ... / thread_group_init / coalitions_init /
+  code_signing_init / task_init / thread_init / restartable_init / workq_init /
+  turnstiles_init / mach_init_activity_id / exception_init / sfi_init /
+  kernel_thread_create / idle_thread_create / sched_startup / thread_daemon_init /
+  thread_call / thread_bind / kdp_init / bootprofile_init / PE_init_kprintf
+Boot version: sweet-shim ；"panic" not a kext ；"TIPP handler" not a kext
+SWD00 isc op=4 kmap=1
+SWD05 vc_progress_set delay=0 gfx=1
+SWD06 gc_enable in
+SWD07 gc_acquired          ← 最后一行，之后无任何输出
+```
+
+**这是本项目至今最深的一次。** 页表、VM、zone、调度器、线程、IOKit 平台专家、驱动注册全部跑起来了，`kmem_range_init` 这个卡了三轮的下溢问题已解。
+
+**新的停点**：`osfmk/console/video_console.c` 的 `initialize_screen()`，op=4（`kPEAcquireScreen`），调用点 `osfmk/kern/startup.c:709`。最后一条打印是 `SWD07 gc_acquired`，之后屏幕冻结。
+
+**SWD01~SWD04 没有出现，这本身是重要信息**：它们位于 `if (boot_vinfo)` 分支内（`SWD01`/`SWD02` 打印 FB 物理地址与映射结果，`SWD03`/`SWD04` 夹住 `gc_initialize`）。`startup.c:709` 传的是 `NULL`，所以这一段整体跳过——**本轮不存在"第二次映射 12.8MB"的问题**，此前担心的 `ml_io_map_unmappable` 完全没被调用。
+
+**屏幕顺序与源码顺序不一致**（`mac_policy_initmach` 出现在 `sched_init` 之前，源码里恰好相反）。**假设（未验证）**：`sweet_fbcon`（0003，走 serial 路径）与 XNU video console（走 `gc_ops.paint_char`）同时在往同一块 framebuffer 上画，各自维护独立光标，于是两个流交错。这与 `SWD05` 打印的 `gfx=1`（`gc_graphics_boot=TRUE`）一致：video console 处于图形模式，`gc_enable(!graphics_now)` 传的是 `FALSE`，即**它把文本输出关掉了**，此后 `vcputc` 全部丢弃。
+
+**结论（已确证部分）**：`initialize_screen` 在 `kPEAcquireScreen` 分支内执行到了 `gc_acquired = TRUE`，即 `vc_progress_set` 与 `gc_enable` 都正常返回，**没有异常**。死点只可能在它返回之后的调用点。
+
+**修复与探针：`0090-sweet-skip-video-console`（提交 `651db40`）**
+
+一处行为改动 + 三个活体探针：
+
+1. `initialize_screen()` 在 `kPEAcquireScreen` 时直接跳过 video console 接管（打印 `SWV1`），只置 `gc_acquired = TRUE`、`gc_graphics_boot = TRUE`，保留 `sweet_fbcon` 这条 serial 输出路径；
+2. `gc_graphics_boot = TRUE` 还有一个作用：`vcattach()` 的 `if (gc_graphics_boot == FALSE)` 分支因此不成立，**不会再把整段 msgbuf 重放到 framebuffer**（那段重放会用 `vinfo.v_baseaddr` 当指针逐字绘制，是本轮最可能的故障源）；
+3. `startup.c:709` 之后打 `SWV2`——证明 `initialize_screen` 真的返回了；
+4. `bsd_init()` 之前打 `SWV3`——如果它出现，说明 `kernel_bootstrap` 全部跑完，M7 完成。
+
+判读：`SWV1` → 跳过生效；`SWV2` → 接管不是死点；`SWV3` → 进 `bsd_init`（M7 达成）；`SWV3` 不出现但 `SWV2` 出现 → 死点在 `vm_commpage_init` 到 `kernel_startup_initialize_upto(LAST)` 之间，范围已缩到很小。

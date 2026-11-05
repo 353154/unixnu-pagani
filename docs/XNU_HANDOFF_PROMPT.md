@@ -40,13 +40,13 @@ ls xnu/patches/ | tail -5                            # 最近加了什么探针
 
 | 项 | 值 |
 | :--- | :--- |
-| 当前阶段 | **M6 已完成**（console 接管通过），进入 M7：`kernel_bootstrap` 跑到 VM 子系统后卡在 kmem 空间分配 |
-| 最新内核提交 | `36ce59d`（`0089` zone map VA 128GB→24GB，**首次行为改动**）；`412a3cf` 是 `0088` 探针版 |
-| 最新构建 | `42049408576`（412a3cf）已实测；`36ce59d` 构建中 |
-| 屏幕最后一行 | `maximum number of VM swap files: 100`（在 panic 之后仍会继续打印，别用它当死点） |
-| 死点 | `kmem_range_init: vm_map_locate_space failing for claim <name> @vm_kern.c:3645/3665` —— **kernel_map 虚拟空间**分配失败，与物理内存无关 |
-| 已确认根因 | `zones` 一项索取 **128GB** VA（`ZONE_MAP_VA_SIZE` 走了 MacOSX 分支），而 `kernel_map` 最大空洞仅 **48,365MB** → `largest_free_size -= total_claims` 无符号下溢 |
-| 下一步动作 | 验证 `SWG claims` 是否从 134,178MB 降到约 27,000MB，以及是否越过 `kmem_range_init` 继续往下跑 |
+| 当前阶段 | **M7 接近完成**：`kmem_range_init` 已通过，`kernel_bootstrap` 跑到尾声（调度器/线程/IOKit 平台专家全部起来），卡在 console 接管之后 |
+| 最新内核提交 | `651db40`（`0090` 跳过 video console 接管 + `SWV1/2/3` 活体探针）；`36ce59d` 是 `0089`（已验证生效） |
+| 最新构建 | `36ce59d` / Run `42051760075` 已实测（23:15:39 引导）；`651db40` 构建中 |
+| 屏幕最后一行 | `SWD07 gc_acquired`（console 接管分支末尾），之后无任何输出 |
+| 死点 | `osfmk/console/video_console.c` 的 `initialize_screen()`，op=4 `kPEAcquireScreen`，调用点 `osfmk/kern/startup.c:709`。**它在函数内部是正常返回的**，死点在返回之后 |
+| 已确认根因（上一关） | `zones` 一项索取 **128GB** VA（`ZONE_MAP_VA_SIZE` 走了 MacOSX 分支），`kernel_map` 仅 48,365MB → 减法无符号下溢。改 24GB 后已解 |
+| 下一步动作 | 读 `SWV1/SWV2/SWV3`：确认跳过生效、`initialize_screen` 返回、是否进 `bsd_init` |
 
 ---
 
@@ -71,8 +71,10 @@ ls xnu/patches/ | tail -5                            # 最近加了什么探针
 | "16KB 页粒度可修（补丁 0083 修 TG1 私有编码）" | §7.15 | **硬件不支持**。`ID_AA64MMFR0_EL1 = 0x00001024`，`TGran16 == 0`，Oryon 只认 4KB（及 64KB） |
 | "124 秒看门狗自动复位" | §7.x | 用户**手动重启**。系统不会自己回来 |
 | "停点位置漂移 = 硬件随机性" | 多处 | `0012` 补丁因 `corrupt patch` 被 CI 整份跳过，stage 10~31 标记**从未编进内核** |
-| "M6 已达成（早期虚拟内存与控制台交接）" | 里程碑报告 | 只达成 VM 侧；**console 接管未通**，已降级为"部分达成" |
+| "M6 已达成（早期虚拟内存与控制台交接）" | 里程碑报告 | 曾降级为"部分达成"；**23:15 实测已真正通过**（`initialize_screen` 走到了 `gc_acquired`） |
 | "`#include <kern/printf.h>`" | 0085 初版 | 该头**不存在**，`kprintf` 声明在 `pexpert/pexpert/pexpert.h:233` |
+| "`SWD01`~`SWD04` 没出现，说明 FB 映射失败" | §13.3 / 本轮初判 | **错**。它们位于 `if (boot_vinfo)` 内，而 `startup.c:709` 传的是 `NULL`，整段本来就跳过。本轮 `ml_io_map_unmappable` **一次都没被调用**，"第二次映射 12.8MB"这个担心在本轮不存在 |
+| "屏幕自上而下就是执行顺序" | 本轮读屏 | **不成立**。`mac_policy_initmach`（源码在 `sched_init` 之后）出现在屏幕上 `sched_init` 之前。假设（未验证）：`sweet_fbcon`（serial 路径）与 XNU video console 同时向同一块 FB 绘制、各自维护光标，两个流交错 |
 | "死点在 `initialize_screen` 的 `ml_io_map_unmappable`" | §13.3 | **已推翻**。真机实测 console 接管完全通过，一路跑到 `vm_swap_init`。当初误判是因为 stage 标记缺失、屏幕没有后续输出 |
 | "屏幕最后一行 = 死点" | §13 方法论 | **本环境 `panic()` 不终止系统**，打印完继续往下跑。必须找"本该出现却没出现的下一行" |
 | "`SWT In 6.1 0x...` 是死循环" | 本轮读屏 | 是 `0083` 对每个 `__startup_func` 的追踪（`SWT in <subsys>.<rank> <func>` / `SWT ok <func>`），底部重复几十行是正常的逐子系统初始化 |
@@ -105,34 +107,47 @@ arm_vm_init → serial_init → startup_initialize_upto(KPRINTF)
 
 **M6 已完成**：console 接管、真 `kprintf` 上屏、VM 子系统五级初始化全部通过。
 
-### 3.2 新死点
+### 3.2 上一关已通过：`kmem_range_init` 下溢（`0089` 修好，`36ce59d` / Run `42051760075` 实测）
+
+**根因**：`zones` 一项索取 128GB VA。尺寸来自 `osfmk/kern/zalloc.c:10148` 的 `KMEM_RANGE_REGISTER_STATIC(zones, &zone_map_range, ZONE_MAP_VA_SIZE)`，而 `ZONE_MAP_VA_SIZE` 按平台分支：MacOSX = **128GB**，其它 = **24GB**。本构建走 MacOSX 分支 → 128GB 塞不进 47GB 的 `kernel_map` → `largest_free_size -= total_claims` 无符号下溢 → 所有 claim 的 size 变成 2⁶² 量级 → `locate` 必然失败。
+
+**修法**：`0089` 把 MacOSX 分支的 `ZONE_MAP_VA_SIZE` 降为 24GB（`#undef` + `#define`，只改这一个宏）。实测 **panic 消失**，`kmem_range_init` 通过。
+
+**顺带破掉一个历史谜团**：panic 的 claim 名在 `vm_ptr_range` / `kmem_data_range` 之间变化，是 `kmem_shuffle_claims()` 随机打乱顺序所致，**不是硬件随机性**。
+
+### 3.3 新停点：console 接管之后（23:15 实测）
+
+内核已经跑完 `kernel_bootstrap` 的绝大部分：
 
 ```
-kmem_range_init: vm_map_locate_space failing for claim vm_ptr_range @vm_kern.c:3645
+kmem_range_init ✔ → vm_swap_init ✔ → machine_lockdown ✔ → PE_lockdown_iokit ✔
+→ platform expert registered ✔ → AppleKeyStore / IOWatchdog / IOCoreSurfaceRoot /
+  HID buttons+touch / BATTERY / AppleCLCD(FB 1216x2640 stride 4864 @0xfc800000) 全部注册
+→ sched_init ✔ → thread_group / coalitions / code_signing / task / thread /
+  restartable / workq / turnstiles / exception / sfi ✔
+→ kernel_thread_create ✔ → idle_thread_create ✔ → sched_startup ✔ → thread_daemon_init ✔
+→ kdp_init ✔ → bootprofile_init ✔ → PE_init_kprintf ✔
+→ "Boot version: sweet-shim" 、kext 检查（"panic" not a kext）
+→ SWD00 isc op=4 kmap=1
+→ SWD05 vc_progress_set delay=0 gfx=1
+→ SWD06 gc_enable in
+→ SWD07 gc_acquired        ← 最后一行
 ```
 
-`kmem_scramble_ranges()` 把 kernel_map 切成 `vm_ptr_range` / `kmem_data_range` / `kmem_sprayqtn_range`，给第一段找连续 **VA** 时失败。空间计算在 `kmem_add_extra_claims()`：
+**死点位置**：`osfmk/console/video_console.c` 的 `initialize_screen()`，`op=4`（`kPEAcquireScreen`），调用点 `osfmk/kern/startup.c:709`。
 
-```c
-vm_map_sizes(kernel_map, NULL, NULL, &largest_free_size);
-largest_free_size -= total_claims;
-ptr_range_size = largest_free_size / ((kmem_ptr_ranges + 1) * 2);
-```
+**已确证**：`vc_progress_set` 和 `gc_enable` **都正常返回**（否则 `SWD06`/`SWD07` 不会打印）。所以死点只可能在它返回之后，即 `vm_commpage_init` → `kernel_startup_initialize_upto(LAST)` → `bsd_init` 这一段。
 
-**已确认根因（`0088` 实测，`412a3cf` / Run `42049408576`）**：`zones` 一项索取 128GB。
+**两个关键事实**：
 
-```
-SWQ12 zones 131072MB        ← 唯一异常项
-SWG   free=48365MB claims=134178MB n=13
-```
+1. `SWD01`~`SWD04` 没有出现，不是故障。它们在 `if (boot_vinfo)` 内，而 `startup.c:709` 传的是 `NULL`，整段本来就跳过。**本轮 `ml_io_map_unmappable` 一次都没被调用**。
+2. `gc_graphics_boot = TRUE`（`SWD05` 的 `gfx=1`），所以 `gc_enable(!graphics_now)` 拿到的是 `FALSE`，video console 把文本输出关掉了。
 
-`zones` 的尺寸来自 `osfmk/kern/zalloc.c:10148` 的 `KMEM_RANGE_REGISTER_STATIC(zones, &zone_map_range, ZONE_MAP_VA_SIZE)`，而 `ZONE_MAP_VA_SIZE` 按平台分支：MacOSX = **128GB**，其它（iOS 等）= **24GB**。本构建走了 MacOSX 分支 → 128GB 塞不进 47GB 的 `kernel_map` → 减法下溢 → 所有 claim 的 size 变成 2⁶² 量级 → `locate` 必然失败。
+### 3.4 正在验证：`0090`（提交 `651db40`）
 
-其余 12 项合计仅 3,106MB，全部正常。`zone_meta 512MB` 是 `atop(VA_SIZE)×16B` 的衍生值，会随 VA 一起下降。
+`initialize_screen()` 在 `kPEAcquireScreen` 时直接跳过 video console 接管，保留 `sweet_fbcon` 这条 serial 输出路径；同时 `gc_graphics_boot = TRUE` 让 `vcattach()` 不再重放整段 msgbuf。
 
-**顺带解释一个历史现象**：panic 的 claim 名在 `vm_ptr_range` / `kmem_data_range` 之间变化，是 `kmem_shuffle_claims()` 随机打乱顺序所致，**不是硬件随机性**。
-
-**验证手段**：`0089` 修复后的 `SWG` 行，见 §7。
+三个探针：`SWV1`（跳过生效）、`SWV2`（`initialize_screen` 已返回）、`SWV3`（即将进 `bsd_init`）。
 
 ---
 
@@ -150,7 +165,7 @@ boot-args 随机性（`startup_debug=0x1` 反而更早停，已回退基线）·
   1. 用户整屏照片 → 多模态直接 OCR（能读 `SWDxx`/`SWExx` 与 `kprintf` 文本行）；
   2. 裁剪放大局部（小号 `iso_font` 8×16）；
   3. Pixel-level 读色带（自己写 PNG 解码，逐像素采样某格是红/绿/亮/灭）——抗模糊、抗反光，**比 OCR 可靠**。
-- **当前检查点体系**：`0083` = 汇编层 `SWT`；`0084` = GIC `SWC01..SWC33`（`GICD_CTLR.RWP` 自旋已改 20 万次有界）；`0085` = console 接管 `SWD00..SWD07` / `SWE00..SWE03`；`0086` = 64×128 红色大数字阶段读数（远距离也能拍清）；`0087` = kernel_map 边界 `SWK0..SWK3`（已完成使命）；`0088` = claim 明细 `SWQ0..SWQ12` + `SWG`（已完成使命，保留在核心里用于验证 `0089`）；`0089` = zone map VA 修复（当前在役）。
+- **当前检查点体系**：`0083` = 汇编层 `SWT`；`0084` = GIC `SWC01..SWC33`（`GICD_CTLR.RWP` 自旋已改 20 万次有界）；`0085` = console 接管 `SWD00..SWD07` / `SWE00..SWE03`；`0086` = 64×128 红色大数字阶段读数（远距离也能拍清）；`0087` = kernel_map 边界 `SWK0..SWK3`（已完成使命）；`0088` = claim 明细 `SWQ0..SWQ12` + `SWG`（已完成使命，保留在核心里用于验证 `0089`）；`0089` = zone map VA 128GB→24GB（已解决问题）；`0090` = 跳过 video console 接管 + `SWV1`/`SWV2`/`SWV3` 活体探针（**当前在役**）。
 - **读屏铁律**：**大数十六进制读不准**。凡是结论依赖具体数值的探针，一律打印十进制 MB/GB（`0088` 起执行）。色带与 MB 数比长十六进制可靠得多。
 
 ---
@@ -205,34 +220,38 @@ python3 ~/unixnu-pagani/tools/auto_boot_pipeline.py --sha $(git rev-parse --shor
 
 ## 7. 下一步该做什么（精确到文件）
 
-### 7.1 当前这一轮：验证 `0089` 是否解掉下溢
+### 7.1 当前这一轮：验证 `0090` 是否把死点推过 `bsd_init`
 
-`0089-sweet-zone-map-va-24g.patch`（提交 `36ce59d`）把 MacOSX 分支的 `ZONE_MAP_VA_SIZE` 从 128GB 降到 iOS 的 24GB。`0088` 的探针保留在核心里，用来验证修复确实生效。
+`0090-sweet-skip-video-console.patch`（提交 `651db40`）在 `initialize_screen()` 的 `kPEAcquireScreen` 分支开头直接返回，跳过整个 video console 接管；并在两个位置加了活体探针。
 
-判读只需要两行：
+看三行，按出现与否分支：
 
-| 看什么 | 修好之后应该是 |
-| :--- | :--- |
-| `SWG free=<MB> claims=<MB> n=13` | `claims` 从 134,178MB 降到 **≈27,000MB**，且 `free > claims` |
-| `SWQ12 zones <MB>` | 从 131,072MB 降到 **24,576MB**；`SWQ0 zone_meta` 从 512MB 降到 ≈96MB |
+| 标记 | 出现说明 | 不出现说明 |
+| :--- | :--- | :--- |
+| `SWV1 video console skipped serial=..` | 跳过生效 | `0090` 没应用，或 op 不是 4 |
+| `SWV2 initialize_screen returned` | 接管**不是**死点 | 死点就在 `initialize_screen` 内部（与我们前面的推断矛盾，需重查） |
+| `SWV3 entering bsd_init` | `kernel_bootstrap` 跑完，**M7 达成** | 死点在 `vm_commpage_init` → `kernel_startup_initialize_upto(LAST)` 之间 |
 
-**然后看是否还出现 `PANIC: kmem_range_init ...`**。若不再出现，说明 `vm_ptr_range` / `kmem_data_range` / `kmem_sprayqtn_range` 三段都分配成功，内核会继续往 `kernel_bootstrap` 后段跑。
+`SWV1` 里的 `vbase=` 还顺带给出 `vinfo.v_baseaddr`——若它与 `0xfc800000` 同级，说明 XNU 拿到的是物理地址当虚拟地址用，这正是之后要做真图形控制台时必须先解决的问题。
 
-### 7.2 可能的结果与分支
+### 7.2 按结果分支
 
-- **`claims≈27GB` 且不再 panic** → 过了。继续盯屏幕后续阶段，准备 M8（PSCI）。
-- **`claims≈27GB` 但仍 panic，claim 名变成别的** → 这次是真正的碎片问题（`free` 是最大空洞不是总空间）。修法：适度放大 `VM_MIN_KERNEL_ADDRESS` 之下的可用区间，或继续下调 `ZONE_MAP_VA_SIZE` 到 16GB/8GB。
-- **`claims` 没变，仍 134,178MB** → `0089` 没生效，先查 `#undef/#define` 的位置是否在该 TU 里确实可见（`ZONE_MAP_VA_SIZE` 只在 `zalloc.c` 内部使用）。
+- **`SWV3` 出现** → M7 完成。下一步是 `bsd_init`：要准备 root ramdisk，否则会在 `bsd_init` 里因为找不到根设备而 panic 或卡住。这是 M9 的入口，提前把 ramdisk 方案想好。
+- **`SWV2` 出现、`SWV3` 不出现** → 死点在 `vm_commpage_init` / `mac_policy_initmach` / `dtrace` / `trust_cache` / `OSKextRemoveKextBootstrap` / `kernel_startup_initialize_upto(LAST)` 这几步之间。这六步已有 `kernel_bootstrap_log`，屏幕上一比就能定位。
+- **只有 `SWV1`、没有 `SWV2`** → 说明 `initialize_screen` 里还有别的路径会挂（例如 `pmap_remove` 或 `kmem_free` 分支），回到函数体内二分。
+- **一个 `SWV` 都没有** → 补丁没进内核。先看流水线的 `MARK SWV1` 是否为负。
 
 ### 7.3 通过之后
 
-`kernel_bootstrap` 剩余阶段跑完 → `bsd_init` → 8 核 PSCI（M8）→ UFS/ramdisk（M9）→ launchd（M10）。
+`bsd_init`（M9，需要 ramdisk/UFS）→ 8 核 PSCI（M8）→ launchd（M10）。
 
-**同时值得评估**：本构建为什么走 `XNU_PLATFORM_MacOSX` 分支。`0089` 只打了补丁，没改平台判定；若后续再遇到「Mac 有、iOS 没有」的常量差异（这类差异在 zalloc / IOKit / 驱动加载路径上还有若干处），应整体切到 iOS 平台配置，而不是逐个打补丁。**但那是一次大改，必须单独一轮、单独归因。**
+**同时值得评估**：本构建为什么走 `XNU_PLATFORM_MacOSX` 分支。`0089` 只打了一个宏补丁，没改平台判定；若后续再遇到「Mac 有、iOS 没有」的常量差异（zalloc / IOKit / 驱动加载路径上还有若干处），应整体切到 iOS 平台配置。**但那是一次大改，必须单独一轮、单独归因。**
 
 ### 7.4 顺手该修的（不阻塞主线）
 
-`SWT in X.2147483647` 说明某条 `__startup_func` 描述的 `rank` 未初始化（`INT_MAX` 哨兵）。且 `SWT` 输出淹了半屏，建议进入 `kernel_bootstrap` 后关掉，恢复读屏信噪比。
+1. `SWT in X.2147483647` 说明某条 `__startup_func` 描述的 `rank` 未初始化（`INT_MAX` 哨兵）。
+2. `SWT` 输出淹了半屏，建议进入 `kernel_bootstrap` 后关掉，恢复读屏信噪比。
+3. **屏幕行的顺序与执行顺序不一致**（见黑名单最后一条），在真正实现图形控制台之前，读屏时要按"内容"而不是按"位置"判断进度。
 
 ---
 
