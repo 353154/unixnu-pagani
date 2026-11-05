@@ -168,6 +168,12 @@ def main():
                    check=True, stdout=subprocess.DEVNULL)
     print("IMAGE READY", flush=True)
 
+    # --no-boot：只准备镜像，不碰设备。铁律 2 要求重启必须由用户明确放行，
+    # 所以"先备好镜像、等用户说可以再 boot"时用这个开关。
+    if "--no-boot" in sys.argv:
+        print("NO-BOOT mode: image staged, device untouched", flush=True)
+        return 0
+
     # 只要 adb 侧能看到本机序列号就重启（get-state 在设备刚重枚举时会返回 offline/空，
     # 曾因此跳过 reboot 然后干等 fastboot 十分钟）
     def adb_ready():
