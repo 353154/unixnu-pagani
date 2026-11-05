@@ -1,0 +1,71 @@
+diff --git a/bsd/skywalk/core/skywalk.c b/bsd/skywalk/core/skywalk.c
+index bdf6a98..ab63978 100644
+--- a/bsd/skywalk/core/skywalk.c
++++ b/bsd/skywalk/core/skywalk.c
+@@ -471,30 +471,37 @@ skywalk_init(void)
+ 
+ 	SK_LOCK();
+ 	skmem_init();
++	printf("SK0 skmem_init done\n");
+ 	error = nexus_init();
++	printf("NX6 nexus_init done err %d\n", error);
+ 	if (error == 0) {
+ 		error = channel_init();
++		printf("CH1 channel_init done err %d\n", error);
+ 	}
+ 	if (error != 0) {
+ 		skywalk_fini();
+ 	}
+ 	SK_UNLOCK();
++	printf("SK1 sk_unlock done\n");
+ 
+ 	if (error == 0) {
+ #if (SK_LOG || DEVELOPMENT || DEBUG)
+ 		/* allocate space for sk_dump_buf */
+ 		sk_dump_buf = sk_alloc_data(SK_DUMP_BUF_SIZE, Z_WAITOK | Z_NOFAIL,
+ 		    skmem_tag_dump);
++		printf("SK2 dump_buf done\n");
+ #endif /* (SK_LOG || DEVELOPMENT || DEBUG) */
+ 
+ 		netns_init();
+ 		protons_init();
+ 		flowidns_init();
++		printf("SK3 ns_init done\n");
+ 
+ #if (DEVELOPMENT || DEBUG)
+ 		skywalk_self_tests();
+ 		skmem_test_init();
+ 		cht_test_init();
++		printf("SK4 selftest done\n");
+ #endif /* DEVELOPMENT || DEBUG */
+ 	}
+ 
+diff --git a/bsd/skywalk/nexus/nexus.c b/bsd/skywalk/nexus/nexus.c
+index 91b7c60..56d9244 100644
+--- a/bsd/skywalk/nexus/nexus.c
++++ b/bsd/skywalk/nexus/nexus.c
+@@ -123,11 +123,14 @@ nexus_init(void)
+ 	ASSERT(!__nx_inited);
+ 
+ 	RB_INIT(&nx_head);
++	printf("NX1 rb_init done\n");
+ 
+ 	na_init();
++	printf("NX2 na_init done\n");
+ 
+ 	/* attach system built-in domains and domain providers */
+ 	nxdom_attach_all();
++	printf("NX3 nxdom_attach done\n");
+ 
+ 	/*
+ 	 * Initialize private kernel nexus controller handle; this is used
+@@ -136,7 +139,9 @@ nexus_init(void)
+ 	 */
+ 	nxctl_init(&_kernnxctl, kernproc, NULL);
+ 	nxctl_retain_locked(&_kernnxctl);       /* one for us */
++	printf("NX4 nxctl_init done\n");
+ 	nxctl_traffic_rule_init();
++	printf("NX5 traffic_rule done\n");
+ 
+ 	__nx_inited = 1;
+ 
