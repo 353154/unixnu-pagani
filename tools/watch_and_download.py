@@ -106,18 +106,21 @@ while True:
                                     "--out-dir", "/Users/damon/unixnu-pagani/out"
                                 ], check=True)
                                 log("✅ test-boot.img 重新合成成功！")
-                                push_wechat("✅ OnePlus 13s XNU v14 镜像已自动下载并打包完毕 (out/test-boot.img)，准备自动引导！")
-                                log(">>> 正在自动重启手机至 Bootloader 准备引导...")
-                                subprocess.run(["adb", "reboot", "bootloader"], check=False)
-                                for _ in range(40):
-                                    time.sleep(1)
+                                push_wechat("✅ OnePlus 13s XNU 镜像已编译并打包完毕 (out/test-boot.img)！")
+                                log(">>> 正在检测 fastboot 设备...")
+                                booted = False
+                                for _ in range(15):
                                     res = subprocess.run(["fastboot", "devices"], stdout=subprocess.PIPE, text=True)
                                     if "3B1F67EA9BBUHK76" in res.stdout or "fastboot" in res.stdout:
                                         log(">>> 探测到 fastboot 设备，正在自动执行 fastboot boot out/test-boot.img...")
                                         boot_res = subprocess.run(["fastboot", "boot", "/Users/damon/unixnu-pagani/out/test-boot.img"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                                         log(f"fastboot boot 输出:\n{boot_res.stdout}\n{boot_res.stderr}")
-                                        push_wechat("🚀 OnePlus 13s XNU v14 已成功自动引导到真机！请查看屏幕！")
+                                        push_wechat("🚀 OnePlus 13s XNU 已成功自动引导到真机！请查看屏幕！")
+                                        booted = True
                                         break
+                                    time.sleep(2)
+                                if not booted:
+                                    log("💡 设备暂未处于 Fastboot 模式。请长按电源键+音量减进入 Fastboot，即可运行 fastboot boot out/test-boot.img 测试！")
                 else:
                     log(f"❌ 构建结束，结果为: {conclusion}")
                     push_wechat(f"❌ XNU 构建结束，结果为: {conclusion}")

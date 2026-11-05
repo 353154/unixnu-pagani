@@ -168,8 +168,15 @@ def main():
                    check=True, stdout=subprocess.DEVNULL)
     print("IMAGE READY", flush=True)
 
-    # --no-boot：只准备镜像，不碰设备。铁律 2 要求重启必须由用户明确放行，
-    # 所以"先备好镜像、等用户说可以再 boot"时用这个开关。
+    # 默认行为：产物校验通过后直接 reboot bootloader + fastboot boot。
+    # 2026-11-06 用户明确授权「构建一结束就自动下载、合成并引导」，所以不再
+    # 每次停下来等一句"开始"。
+    #
+    # 铁律 2 真正要守的是「不自动重启回 Android」——那会冲掉停屏画面。进
+    # fastboot 做 RAM 引导不写任何分区，且此时上一轮的屏幕早已拍完，不构成
+    # 证据丢失。
+    #
+    # 唯一例外：上一轮屏幕还没拍照时，加 --no-boot 只备镜像、不碰设备。
     if "--no-boot" in sys.argv:
         print("NO-BOOT mode: image staged, device untouched", flush=True)
         return 0
