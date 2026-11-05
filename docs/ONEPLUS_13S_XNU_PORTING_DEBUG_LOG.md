@@ -602,3 +602,17 @@ KVA L1 合法 → 硬件 walk 进入 L2 → L2 条目内容错误(0xA30) → 翻
 4. 回头考据：为何 KVA L2 未被正确写入（stale 未清零？分配布局错位？）——修好启动后追查 create_bootstrap_mapping
 
 **今日总战绩**：单日 11 个构建、9 次真机迭代，攻克 6 个独立根因（OSLAR UD / WXN / C=0 / CSE 致命 / TG1 编码 / KVA L2 错误表项），执行流从「MMU 开启第一条指令」推进到「距 C 语言世界一跳」。
+
+### 7.17 终局跃迁 (2026-11-05 15:32，v13 ~ v17 攻坚破晓)
+
+**v14 ~ v16 铁证实锤解码**：
+- Row 1: `TCR_EL1 = 0x6511a511` (v15 拔除假补丁 0083，TG1=0b01 完美符合 ARMv8-A 16KB granule 标准编码)
+- Row 2: `TTBR1 = 0xb1180000` (指向 KVA L1 根表)
+- Row 3: `L1 Desc = 0xb1188003` (指向 KVA L2 表 `0xb1188000`, Table=1, Valid=1)
+- Row 4: `L2 Desc = 0xb0000601` (手写注入的 PA `0xb0000000` 映射真实生效且被读取，Outer Shareable, AF=1)
+
+**v17 组合拳修复（破除静默挂死）**：
+1. **物理 VBAR_EL1 接管**：将 `VBAR_EL1` 维持为平坦物理映射地址 `0xb148e000`。任何在 KVA 切换期间产生的 Synchronous Abort 将 100% 被捕获，绝不发生 Double-fault 递归死锁！
+2. **KVA 预读探测（Pre-jump Probe）**：在平坦模式下执行 `ldr w11, [lr]`。若 TTBR1 走表读内存成功，立即在 `(520, 240)` 绘制 30x30 纯白方块；若失败直接被物理 VBAR 捕获！
+3. **消除 RAS 干扰**：改用 `mov x12, lr; br x12` 进行绝对间接跳转，不触碰微架构 RAS 返回地址预测器。
+4. **清除 PAN**：在 `sweet_kva_probe` 开头执行 `msr pan, #0; isb sy`，确保 EL1 内核态访问低半区 Framebuffer 时不受硬件权限阻断。
