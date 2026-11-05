@@ -1412,3 +1412,46 @@ sweetfb_noconsole=1 sweetfb_hz=30
 5. 构建工具链：LLVM、CMake、Ninja、dtc、OpenSSL、bison、flex、glslang、shaderc、SPIR-V Tools、rustup。
 
 **不做的事。** 对方目标根分区是一块 64 GiB 的 `unixnu` 分区（LUN 0，LBA 44928768–61705983）。我们**不建分区、不写分区**，只跑 RAM 版（`Data` 为 RAM seed，运行时不写盘），与本仓库铁律 §1 一致。
+
+### 14.18 切换落地：UniXNU 工作区已跑通 defconfig/status/fetch，内核构建中（2026-11-06 01:55）
+
+用户确认切换路线。工作区建在 `~/pagani-unixnu/`，四个仓库 + 一个必须的第五个：
+
+| 目录 | 来源 | 说明 |
+| :--- | :--- | :--- |
+| `UniXNU-maintain` | `IssacL04/UniXNU_Enc3l` @ `b962645` | **构建驱动**。必须用它，不能用 `UniXNU/UniXNU` 主线 |
+| `issac` | `IssacL04/UniXNU-Pagani_SM8750` | **设备仓库（主线）**，`-D ../issac` |
+| `UniXNU-Pagani_SM8750` | `Shad0w23333/UniXNU-Pagani_SM8750` 分支 `oneplus13t-a830` | 原生 A830 GPU 线，留作对照 |
+| `UniXNU-Pagani-Drivers` | `IssacL04/UniXNU-Pagani-Drivers` | 驱动与 kit |
+| `UniXNU-sm8750-common` | `IssacL04/UniXNU-sm8750-common` | SoC 公共层（`feeds.toml` 给出地址） |
+
+**踩到的两个坑（都会表现为一句模糊报错）：**
+
+1. `unixnu: unknown component: BootProgress` —— 用了 `UniXNU/UniXNU` 上游主线。设备仓库的 `upstream.rev` 指向 `b962645`（`IssacL04/UniXNU_Enc3l`），必须切到那个提交。
+2. `unixnu: unknown component: Adreno830` —— 用了 `Shad0w23333` 的 `oneplus13t-a830` 分支。该分支比配套主仓库更新，组件定义还没并进 `b962645`。**改用 `IssacL04` 的主线设备仓库后解析通过。**
+
+**已验证跑通的命令（在 `UniXNU-maintain` 下）：**
+
+```
+./unixnu defconfig oneplus13t_defconfig -D ../issac     # 写 out/.../.config
+./unixnu fetch                                          # 拉齐源码，out/ ≈ 685 MB
+./unixnu status                                         # 全绿，见下
+./unixnu ipsw info                                      # 目标 IPSW 成员表
+./unixnu ipsw fetch KernelCache StaticTrustCache Cryptex1,SystemTrustCache
+```
+
+`status` 解析出的钉住版本：`xnu d8b80295118e`、`libpthread c0e60fb5ecfc`、`libdispatch 30fe6a7d9453`、`libplatform a00a4cc36da2`、`corecrypto 11fba65b12d8`、`IOStorageFamily e45fbe30a787`、`edk2 cfb93724a06f`、`AvailabilityVersions 933f9360f1b7`、`sm8750 feaa135df476`。
+
+`ipsw info` 确认目标：`iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw`（iPad7,1 / `j120ap`），成员含 `kernelcache.release.ipad7`(16.2 MB)、`StaticTrustCache`(59 KB)、`Cryptex1,SystemTrustCache`、`OS`(5.2 GB)、`Cryptex1,SystemOS`(3.3 GB)。已把小件拉下并解出：
+
+```
+out/ipsw/21H461/kernelcache.decompressed
+out/ipsw/21H461/044-76040-038.dmg.trustcache        # StaticTrustCache
+out/ipsw/21H461/044-76034-038.dmg.trustcache        # Cryptex1,SystemTrustCache
+```
+
+`unixnu.local.toml` 已写：`device=../issac`、`dtb=../unixnu-pagani/firmware_dump/extracted.dtb`（**本仓库早先 dump 的原厂 DTB 直接可用**）、`kernelcache`/`trust_cache` 指向上面两件、`jobs=8`、`target=DEBUG`。`./unixnu build kernel` 已启动（后台，`~/pagani-unixnu/build-kernel.log`）。
+
+**唯一的硬阻塞：`UEFI-Pagani_SM8750` 不公开。** `board.toml` 需要 `{uefi}/Platforms/OnePlus/oneplus13tPkg/oneplus13t.dsc`（Mu-Silicium 派生），但该仓库在 `IssacL04`、`Shad0w23333` 名下都没有公开条目，全站搜索也没有。没有它就只能出内核，出不了 `boot.img`。三条出路：① 找作者要（GitHub issue / Telegram `@unixnu` / QQ 群）；② 以 Mu-Silicium 为基底自建 `Platforms/OnePlus` 包（仓库里公开了 `patches/mu-*` 与 `Resources/MuPatches/OnePlus13T.patch`，可作蓝本，但工作量大）；③ 混合方案：用我们已有的 shim 加载他们构建出的 `kernel.macho`（但缺少 UEFI 的 HOB/内存图与 `UniXNURamDiskDxe` 交接，风险高）。
+
+**工具链现状（本机，无 brew）：** `ninja` 已用 pip 装好；`cmake` 待装；`dtc`、`glslang`/`shaderc`/`spirv-tools`（仅 GPU 线需要）缺。`openssl`、`bison`、`flex`、`rustup` 已有；Xcode 可用。
