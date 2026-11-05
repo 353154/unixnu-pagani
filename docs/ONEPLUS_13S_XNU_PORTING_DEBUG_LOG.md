@@ -704,3 +704,46 @@ KVA L1 合法 → 硬件 walk 进入 L2 → L2 条目内容错误(0xA30) → 翻
      - **`FAR_EL1[31:0]`** = **`0x034196c0`**（对应高地址 `0xfffffe00034196c0`，即 `sweet_early_relocate` 切换后的内核显存虚拟地址 `SWEET_EARLY_FB_VA`！）
      - **根因**：`arm_vm_init` 在调用 `sweet_early_relocate` 前执行了 `set_mmu_ttb_alternate(cpu_ttep)`，而当前内核编译时在 `SWEET.h` 中定义了 `#define __ARM_16K_PG__ 1`，因此 `arm_vm_init` 构建的 `cpu_ttep` 是 16KB 粒度的页表，与 Oryon 硬件所需的 4KB 粒度页表不兼容。
      - **下一步（Milestone 5 收官）**：将 XNU 内核配置从 16KB 页表（`__ARM_16K_PG__`）切换为 ARM64 原生 4KB 页表（参考树莓派 `BCM2837.h`），使 `arm_vm_init` 和 `pmap` 原生生成 4KB 页表！
+
+
+#### 8. 原生 4KB XNU 全量构建与静态断言/链接修复 (Milestone 5 彻底收官) (2026-11-05 18:30)
+- **挑战**：在将 `pexpert/pexpert/arm64/SWEET.h` 关闭 `__ARM_16K_PG__` 切换为 4KB 模式后，CI 构建遭遇了两个严重问题：
+  1. **MACHINE_CONFIG 链接错误**：如果使用 `MACHINE_CONFIG=PAGANI`，因为 `config/MASTER.arm64.pagani` 缺失，内核会默认回退并链接闭源 stub，导致 pmap/locore 符号缺失。因此保持 `MACHINE_CONFIG=SWEET`，利用 `MASTER.arm64.sweet` 链接开源的 `pmap` 与 `locore.s`。
+  2. **`pmap.c:10988` 静态断言失败**：
+     `static_assert(_COMM_PAGE64_BASE_ADDRESS < MACH_VM_MAX_ADDRESS);`
+     - **根因**：`osfmk/mach/arm/vm_param.h` 中在 `defined(HAS_APPLE_PAC)` 或非 PAC 下，`MACH_VM_MAX_ADDRESS_RAW` 默认使用了 47-bit 地址 `0x7FFFFE000000ULL`，而在 4KB 分页下，`_COMM_PAGE64_BASE_ADDRESS` 是 `0x0000000FE0000000ULL`，导致断言失败。
+     - **修复**：在 `0004-sweet-machine-config.patch` 中，给 47-bit 加上 `&& defined(ARM_LARGE_MEMORY)` 保护，使 4KB 分页架构使用 `0x0000000FC0000000ULL`。
+- **构建结果**：GitHub Actions CI Run `42007726761` 成功编译通过，生成 149MB 的原生 4KB 内核 `kernel.development.sweet`（符号表确认：`native_pt_attr = &pmap_pt_attr_4k`, `pta_page_size = 4096`, `pta_page_shift = 12`）。
+
+#### 9. 修复早期 Framebuffer I/O 映射超限，真机首通 Stage 1~20 (Milestone 6 突破) (2026-11-05 20:00)
+- **真机初试 4KB 内核**：引导后屏幕顶部连续打印了 `SWEET EARLY 1` 到 `17`，并在 `SWEET EARLY 17: fbcon config read; mapping` 时触发 Red Screen Panic：
+  `SWEET EARLY PANIC: pmap_map_bd_with_options: no PTE for vaddr=0xffffffff01b00000, start=0xfc800000, end=0xff300000`
+- **根因分析**：
+  在 `tools/mkadt.py` 中，`sweet-fbcon` 节点声明的显存大小为 43MB（`0x2b00000`）。而在 4KB 分页下，系统在 `arm_vm_init` 中为早期 I/O 动态映射分配的 L3 页表只有约 28MB。43MB 远远超出了预留的 L3 表项池，导致分配中途耗尽 PTE 发生 panic。
+- **精确修复**：
+  OnePlus 13s 实际屏幕分辨率为 1216×2640×4 约 12.25MB。将 `mkadt.py` 中的 `FB_SIZE` 调整为 16MB（`0x1000000`），完美契合早期 I/O 空间。
+- **验证突破**（对应照片 `media_1793880287698_5ef1a4aa.jpg`）：
+  - 红屏 Panic 彻底消失；
+  - 屏幕底部进度条一路绿灯亮到第 20 格；
+  - 屏幕正中显示 `SWEET EARLY 20: kprintf startup complete`！
+  - 标志着 **原生 4KB MMU 物理映射、TTBR0 销毁、TTBR1 重构、`pmap_bootstrap` 核心内存管理 100% 成功！**
+
+#### 10. 突破静音限制：XNU 官方图形控制台与真实 kprintf 屏幕输出首度点亮！(2026-11-05 20:30)
+- **问题分析**：为什么在 Stage 20 后屏幕停止输出？
+  1. `0012` 补丁中存在 `if (serial_exists) sweet_early_disable();`，主动关闭了早期控制台；
+  2. XNU DEVELOPMENT 内核中，`disable_serial_output` 和 `disable_kprintf_output` 默认全为 `true`，未传调试参数时内核日志被静音。
+- **改动实施**：
+  1. 移除 `sweet_early_disable()`，阶段上限扩大至 40，扩展 `arm_init()` 打桩至阶段 31；
+  2. 强制将 `disable_serial_output` 和 `disable_kprintf_output` 设为 `false`，并在 boot-args 中注入 `-enable_kprintf_spam debug=0x8`。
+- **重大历史突破**（对应照片 `media_1793881794601_82974dbc.jpg`）：
+  真机引导后，屏幕顶部首次输出了 **原汁原味的苹果 XNU 真实内核日志**：
+  ```text
+  kprintf initialized
+  Serial mode specified: 00000003
+  initialize_screen: b=FC800000, w=000004C0, h=00000A50, r=00001300, d=00000002
+  ```
+  苹果图形核心 `initialize_screen` 完美识别出 OnePlus 13s 的硬件参数：基址 `0xfc800000`、宽 `0x4C0` (1216)、高 `0xA50` (2640)、stride `0x1300` (4864)！
+
+#### 11. 解决二次显存映射 L3 页表配额冲突 (2026-11-05 20:35)
+- **分析与修复**：
+  `sweet_fbcon` 映射了 16MB，随后 `initialize_screen` 又试图进行第二次映射（12.25MB），两次累计 28.25MB。在 `osfmk/arm64/arm_vm_init.c:2255` 中为早期 I/O L3 页表额外预留 64MB 空间（`va_l1_end += (64 << 20)`），并已将补丁维护进代码库（Commit `2d80ac8`，Run `#42028219974` 构建成功）。
